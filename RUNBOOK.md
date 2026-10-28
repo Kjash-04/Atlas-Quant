@@ -28,15 +28,30 @@ Atlas-Quant is an autonomous multi-agent quantitative research and execution eng
 - **Action**:
   1. Execution agent immediately cancels all pending orders and blocks new entries.
   2. Review residual log in `learnings` and `trades` tables to identify failure mode.
-  3. Manual admin reset requires `POST /admin/reset-circuit-breaker` with token `ADMIN_RESET_CONFIRMED` only after quantitative root cause analysis.
+  3. Manual admin reset requires `POST /admin/reset-circuit-breaker` using `ADMIN_RESET_TOKEN` from `.env` and authenticated with `X-API-Key`.
+  - **Command Line**:
+    ```powershell
+    $KEY = (Select-String -Path .env -Pattern '^ADMIN_API_KEY="?([^"\r\n]+)' | ForEach-Object { $_.Matches.Groups[1].Value })
+    $TOKEN = (Select-String -Path .env -Pattern '^ADMIN_RESET_TOKEN="?([^"\r\n]+)' | ForEach-Object { $_.Matches.Groups[1].Value })
+    curl -X POST http://localhost:8000/admin/reset-circuit-breaker `
+      -H "Content-Type: application/json" `
+      -H "X-API-Key: $KEY" `
+      -d "{\"admin_token\": \"$TOKEN\"}"
+    ```
+  - **Dashboard**: Enter `ADMIN_RESET_TOKEN` into the sidebar password field and click `🔄 Reset Circuit Breaker`.
 
 ### Incident 3: Emergency Kill Switch Procedure
 - **Trigger**: Broker quote anomaly, network disconnection, or unexpected market event.
 - **Command Line**:
   ```powershell
-  curl -X POST http://localhost:8000/admin/kill -H "Content-Type: application/json" -d "{\"reason\": \"Admin manual emergency kill\", \"admin_token\": \"EMERGENCY_KILL_AUTHORIZED\"}"
+  $KEY = (Select-String -Path .env -Pattern '^ADMIN_API_KEY="?([^"\r\n]+)' | ForEach-Object { $_.Matches.Groups[1].Value })
+  $TOKEN = (Select-String -Path .env -Pattern '^ADMIN_EMERGENCY_KILL_TOKEN="?([^"\r\n]+)' | ForEach-Object { $_.Matches.Groups[1].Value })
+  curl -X POST http://localhost:8000/admin/kill `
+    -H "Content-Type: application/json" `
+    -H "X-API-Key: $KEY" `
+    -d "{\"reason\": \"Admin manual emergency kill\", \"admin_token\": \"$TOKEN\"}"
   ```
-- **Dashboard**: Click `🚨 Engage Kill Switch` on the sidebar.
+- **Dashboard**: Enter your admin token into the sidebar password field and click `🚨 Engage Kill Switch`.
 - **Result**: Instantly flattens all open positions and places circuit breaker into `HALTED`.
 
 ---
@@ -65,7 +80,7 @@ Before switching `LIVE_TRADING=true` from `PAPER_TRADING=true`:
 - [ ] Positive expectancy after costs verified across all market regimes.
 - [ ] Walk-forward parameter stability confirmed across >= 4 folds.
 - [ ] Maximum paper drawdown remained strictly under 8.0%.
-- [ ] Signed `HumanApprovalRecord` submitted via `POST /admin/approve-live`.
+- [ ] Signed `HumanApprovalRecord` submitted via `POST /admin/approve-live` with `X-API-Key` and `hmac_sha256:<hex>` signature (signed with `ADMIN_HMAC_SECRET`).
 - [ ] Google Cloud billing cap confirmed at $0.00 with disable alerts configured.
 - [ ] Exact Risk Disclaimer accepted by the operator:
   > *"Research/educational only. Not financial advice. Past performance does not guarantee future results. Live trading requires explicit human approval."*
