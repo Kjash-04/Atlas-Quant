@@ -119,3 +119,21 @@ def test_all_barriers_pass_and_sizes_lots(base_intent, sample_snapshot):
     res = risk.check(base_intent, {"equity": 100000.0, "free_margin": 95000.0}, sample_snapshot, [])
     assert res.approved is True
     assert res.approved_lots > 0.0
+    # Sizing respects 5% max position equity limit
+    assert res.approved_lots <= 0.05
+
+
+def test_max_position_equity_pct_enforced():
+    from src.risk_engine.sizing import calculate_risk_sized_lots
+    # Account equity = $100,000, max_position_equity_pct = 0.05 (Max notional = $5,000)
+    # EURUSD price = 1.0860, point_value = 100,000
+    # Stop distance is very small (0.0004 -> 4 pips), raw stop risk would size to 25 lots!
+    # But notional exposure cap restricts it: 5000 / (1.0860 * 100000) = 0.046 -> 0.04 lots
+    lots = calculate_risk_sized_lots(
+        equity=100000.0,
+        stop_distance_price=0.0004,
+        risk_fraction=0.01,
+        current_price=1.0860,
+        max_position_equity_pct=0.05,
+    )
+    assert lots == 0.04

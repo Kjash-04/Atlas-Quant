@@ -63,10 +63,12 @@ class Settings:
         self.MT5_SERVER: str = os.getenv("MT5_SERVER", "MetaQuotes-Demo")
         self.MT5_TIMEOUT_MS: int = _get_int("MT5_TIMEOUT_MS", 60000)
 
-        # LLM Routing (Two Keys - $0 net spend)
-        self.GEMINI_FREE_API_KEY: str = os.getenv("GEMINI_FREE_API_KEY", "")
-        self.GEMINI_DEEP_API_KEY: str = os.getenv("GEMINI_DEEP_API_KEY", "")
-        self.GEMINI_ROUTINE_MODEL: str = os.getenv("GEMINI_ROUTINE_MODEL", "gemini-3.8-flash")
+        # LLM Routing (Two Keys - $0 net spend) - with fallbacks for alternative starter naming
+        gemini_free = os.getenv("GEMINI_FREE_API_KEY") or os.getenv("GEMINI_API_KEY", "")
+        gemini_deep = os.getenv("GEMINI_DEEP_API_KEY") or os.getenv("GEMINI_API_KEY", "")
+        self.GEMINI_FREE_API_KEY: str = gemini_free
+        self.GEMINI_DEEP_API_KEY: str = gemini_deep
+        self.GEMINI_ROUTINE_MODEL: str = os.getenv("GEMINI_ROUTINE_MODEL") or os.getenv("GEMINI_FAST_MODEL", "gemini-3.8-flash")
         self.GEMINI_DEEP_MODEL: str = os.getenv("GEMINI_DEEP_MODEL", "gemini-4-argon")
 
         # Deep LLM Guardrails
@@ -78,21 +80,28 @@ class Settings:
 
         # Database
         default_db = f"sqlite:///{self.BASE_DIR / 'data' / 'atlas_quant.db'}"
-        self.DATABASE_URL: str = os.getenv("DATABASE_URL", default_db)
+        self.DATABASE_URL: str = os.getenv("DATABASE_URL") or os.getenv("DB_URL", default_db)
         self.REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
         # Immutable Risk Parameters
         self.RISK_MAX_DAILY_LOSS_PCT: float = _get_float("RISK_MAX_DAILY_LOSS_PCT", 0.03)
         self.RISK_MAX_DRAWDOWN_PCT: float = _get_float("RISK_MAX_DRAWDOWN_PCT", 0.10)
-        self.RISK_PER_TRADE_FRACTION: float = _get_float("RISK_PER_TRADE_FRACTION", 0.01)
+        self.RISK_PER_TRADE_FRACTION: float = _get_float("RISK_PER_TRADE_FRACTION", _get_float("RISK_PER_TRADE", 0.01))
+        self.RISK_MAX_POSITION_EQUITY_PCT: float = _get_float("RISK_MAX_POSITION_EQUITY_PCT", 0.05)
         self.RISK_MAX_OPEN_POSITIONS: int = _get_int("RISK_MAX_OPEN_POSITIONS", 3)
         self.RISK_MAX_DAILY_TRADES: int = _get_int("RISK_MAX_DAILY_TRADES", 10)
         self.RISK_MAX_SPREAD_PIPS: float = _get_float("RISK_MAX_SPREAD_PIPS", 2.5)
         self.RISK_NEWS_BLACKOUT_MINUTES: int = _get_int("RISK_NEWS_BLACKOUT_MINUTES", 30)
         self.RISK_ALLOWED_SESSIONS: str = os.getenv("RISK_ALLOWED_SESSIONS", "LONDON,NEW_YORK,OVERLAP_LDN_NY")
 
+        # Admin & Safety Secret Tokens (Externalized for security)
+        self.ADMIN_API_KEY: str = os.getenv("ADMIN_API_KEY", "")
+        self.ADMIN_EMERGENCY_KILL_TOKEN: str = os.getenv("ADMIN_EMERGENCY_KILL_TOKEN", "EMERGENCY_KILL_AUTHORIZED")
+        self.ADMIN_RESET_TOKEN: str = os.getenv("ADMIN_RESET_TOKEN", "ADMIN_RESET_CONFIRMED")
+        self.ADMIN_HMAC_SECRET: str = os.getenv("ADMIN_HMAC_SECRET", "atlas_quant_admin_hmac_secret_2026")
+
         # Alerts
-        self.ALERT_TELEGRAM_BOT_TOKEN: str = os.getenv("ALERT_TELEGRAM_BOT_TOKEN", "")
+        self.ALERT_TELEGRAM_BOT_TOKEN: str = os.getenv("ALERT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.ALERT_TELEGRAM_CHAT_ID: str = os.getenv("ALERT_TELEGRAM_CHAT_ID", "")
         self.ALERT_SLACK_WEBHOOK_URL: str = os.getenv("ALERT_SLACK_WEBHOOK_URL", "")
         self.ALERT_CONSOLE_LOG: bool = _get_bool("ALERT_CONSOLE_LOG", True)

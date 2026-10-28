@@ -16,6 +16,8 @@ class BacktestReporter:
         oos_m = result.oos_metrics
         costs = result.costs_breakdown
 
+        oos_deg_str = f"{oos_m.oos_degradation_pct:.1f}%" if oos_m.oos_degradation_pct is not None else "N/A (IS Sharpe <= 0.1)"
+
         lines = [
             f"# ATLAS-QUANT BACKTEST REPORT — {result.strategy_id} ({result.version_id})",
             f"**Run ID**: `{result.run_id}` | **Generated**: `{result.created_at.isoformat()}`",
@@ -33,7 +35,7 @@ class BacktestReporter:
             f"| **Expectancy ($/trade)** | ${is_m.expectancy_usd:.2f} | ${oos_m.expectancy_usd:.2f} | {'N/A' if not result.test_metrics else f'${result.test_metrics.expectancy_usd:.2f}'} |",
             f"| **Win Rate %** | {is_m.win_rate_pct:.1f}% | {oos_m.win_rate_pct:.1f}% | {'N/A' if not result.test_metrics else f'{result.test_metrics.win_rate_pct:.1f}%'} |",
             f"| **Trade Count** | {is_m.total_trades} | {oos_m.total_trades} | {'N/A' if not result.test_metrics else result.test_metrics.total_trades} |",
-            f"| **OOS Degradation** | — | {oos_m.oos_degradation_pct:.1f}% | — |",
+            f"| **OOS Degradation** | — | {oos_deg_str} | — |",
             "",
             "## 2. Friction & Real-World Cost Breakdown",
             f"- **Commission**: ${costs.get('total_commission_usd', 0.0):.2f}",
@@ -54,10 +56,16 @@ class BacktestReporter:
             lines.append("- :white_check_mark: OOS Sharpe degradation within acceptable threshold (<30%).")
             lines.append("- :white_check_mark: Maximum drawdown within capital preservation limit (<15%).")
 
+        test_audit_notice = (
+            "- Held-out test set touched strictly once during final champion validation."
+            if result.test_metrics is not None
+            else "- Held-out test set: Not touched (strategy rejected during validation)."
+        )
+
         lines.extend([
             "",
             "## 4. Red Flags & Governance Warnings",
-            "- Held-out test set touched strictly once during final validation.",
+            test_audit_notice,
             "- Parameter space continuity verified without isolated curve-fitting islands.",
             "- Deterministic execution path: Zero free-form LLM interpretation at runtime.",
             "",

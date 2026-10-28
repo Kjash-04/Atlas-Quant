@@ -23,7 +23,7 @@ class BacktestMetrics(BaseModel):
     total_trades: int = 0
     avg_trade_pnl: float = 0.0
     turnover: float = 0.0
-    oos_degradation_pct: float = 0.0
+    oos_degradation_pct: Optional[float] = None
     slippage_sensitivity_pct: float = 0.0
     worst_day_loss_pct: float = 0.0
     estimated_capacity_usd: float = 100000.0

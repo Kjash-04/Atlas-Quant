@@ -78,8 +78,8 @@ class LLMBudgetGuard:
             return False
         return True
 
-    def record_deep_call(self, tokens_used: int = 0) -> None:
-        """Records an authorized deep call and updates daily counter."""
+    def record_deep_call(self, tokens_used: int = 0, cost_usd: float = 0.0) -> None:
+        """Records an authorized deep call and updates daily counter and spend telemetry."""
         self.rollover_check()
         if self.deep_calls_today >= self.max_daily_calls:
             raise BudgetExhaustedError(
@@ -88,10 +88,12 @@ class LLMBudgetGuard:
             )
         self.deep_calls_today += 1
         self.total_tokens_today += tokens_used
-        # Monthly Google AI Pro cloud credit covers calls -> net spend is 0.00
-        self.estimated_spend_usd = 0.00
+        self.estimated_spend_usd = round(self.estimated_spend_usd + cost_usd, 4)
         self._save_state()
-        logger.info(f"Recorded Deep LLM Call: {self.deep_calls_today}/{self.max_daily_calls} used today.")
+        logger.info(
+            f"Recorded Deep LLM Call: {self.deep_calls_today}/{self.max_daily_calls} used today. "
+            f"Tokens: {tokens_used}, Spend: ${self.estimated_spend_usd:.4f}"
+        )
 
     def get_status(self) -> Dict[str, Any]:
         self.rollover_check()

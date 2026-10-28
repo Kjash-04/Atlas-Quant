@@ -173,6 +173,7 @@ class LLMRouter:
         response_text = ""
         in_tokens = len(prompt) // 4
         out_tokens = 0
+        is_real_api_call = False
 
         if client and settings.GEMINI_DEEP_API_KEY:
             try:
@@ -181,6 +182,7 @@ class LLMRouter:
                 if hasattr(res, "usage_metadata") and res.usage_metadata:
                     in_tokens = getattr(res.usage_metadata, "prompt_token_count", in_tokens)
                     out_tokens = getattr(res.usage_metadata, "candidates_token_count", len(response_text) // 4)
+                is_real_api_call = True
             except Exception as e:
                 logger.error(f"Gemini Deep API call failed: {e}. Falling back to deterministic reasoning.")
                 response_text = self._mock_deep_response(purpose, prompt)
@@ -188,7 +190,14 @@ class LLMRouter:
             response_text = self._mock_deep_response(purpose, prompt)
 
         out_tokens = max(out_tokens, len(response_text) // 4)
-        budget_guard.record_deep_call(tokens_used=in_tokens + out_tokens)
+        
+        # Real cost telemetry: ~$1.25 / 1M prompt tokens, $5.00 / 1M candidate tokens
+        call_cost_usd = round((in_tokens * 1.25 / 1_000_000.0) + (out_tokens * 5.00 / 1_000_000.0), 6)
+
+        # Only charge daily budget if a real API response was successfully received
+        if is_real_api_call:
+            budget_guard.record_deep_call(tokens_used=in_tokens + out_tokens, cost_usd=call_cost_usd)
+
         self._write_cache(model, prompt, response_text)
 
         record = LLMCallRecord(
@@ -198,7 +207,7 @@ class LLMRouter:
             prompt_hash=prompt_hash,
             token_count_input=in_tokens,
             token_count_output=out_tokens,
-            estimated_cost_usd=0.00,  # Covered by monthly Google AI Pro cloud credit
+            estimated_cost_usd=call_cost_usd if is_real_api_call else 0.00,
             cache_hit=False,
         )
         return response_text, record

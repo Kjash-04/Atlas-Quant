@@ -23,7 +23,7 @@ langgraph>=0.2.0
 langchain-core>=0.2.0
 
 # Broker Connectivity (Windows x64 Native)
-MetaTrader5>=5.0.45
+MetaTrader5>=5.0.45 ; platform_system == "Windows"
 
 # Interactive Visualization & UI
 streamlit>=1.38.0

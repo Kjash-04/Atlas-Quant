@@ -7,9 +7,13 @@ trade execution, LLM call auditing, and administrative safety controls.
 from __future__ import annotations
 
 import uuid
+import hashlib
+import hmac
+import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, Depends, HTTPException, Query, status
+from fastapi import FastAPI, Depends, Header, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -36,26 +40,58 @@ from src.risk_engine.engine import risk_engine
 from src.schemas.market import MarketSnapshot
 from src.schemas.trade import OrderExecutionResult, OrderIntent
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager replacing deprecated on_event startup/shutdown."""
+    init_db()
+    yield
+
+
 # Initialize FastAPI App
 app = FastAPI(
     title="Atlas-Quant Autonomous Research & Trading API",
     description="Multi-AI-Agent Quantitative Research and Risk-Controlled Execution Engine.",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
+# CORS Policy: Explicit trusted local origins (no wildcard with credentials)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:8000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-@app.on_event("startup")
-def on_startup():
-    """Ensure database schema is created on application start."""
-    init_db()
+def require_api_key(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+) -> bool:
+    """Authenticates admin and privileged order endpoints when ADMIN_API_KEY is configured."""
+    if not settings.ADMIN_API_KEY:
+        return True  # Dev mode / unauthenticated local development
+
+    token = x_api_key
+    if not token and authorization:
+        if authorization.lower().startswith("bearer "):
+            token = authorization[7:].strip()
+        else:
+            token = authorization.strip()
+
+    if token != settings.ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: Missing or invalid API key",
+        )
+    return True
 
 
 # ------------------------------------------------------------------------------
@@ -310,7 +346,7 @@ def list_orders(limit: int = Query(50, le=100), db: Session = Depends(get_db)):
     ]
 
 
-@app.post("/orders")
+@app.post("/orders", dependencies=[Depends(require_api_key)])
 def submit_order_intent(intent: OrderIntent, db: Session = Depends(get_db)):
     """
     Submits an order intent to the ExecutionAgent.
@@ -362,10 +398,10 @@ def get_metrics_summary(db: Session = Depends(get_db)):
 # ------------------------------------------------------------------------------
 # Administrative & Emergency Safety Controls
 # ------------------------------------------------------------------------------
-@app.post("/admin/kill")
+@app.post("/admin/kill", dependencies=[Depends(require_api_key)])
 def emergency_kill(req: KillRequest):
     """Emergency kill switch endpoint: flattens positions and halts engine."""
-    if req.admin_token != "EMERGENCY_KILL_AUTHORIZED":
+    if req.admin_token != settings.ADMIN_EMERGENCY_KILL_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid admin authorization token")
     closed = execution_agent.emergency_flatten_and_kill(reason=req.reason)
     alert_dispatcher.dispatch("SEV-1", "EMERGENCY KILL SWITCH ENGAGED", req.reason)
@@ -376,7 +412,7 @@ def emergency_kill(req: KillRequest):
     }
 
 
-@app.post("/admin/reset-circuit-breaker")
+@app.post("/admin/reset-circuit-breaker", dependencies=[Depends(require_api_key)])
 def reset_circuit_breaker_endpoint(req: ResetCircuitBreakerRequest):
     success = risk_engine.reset_circuit_breaker(token=req.admin_token)
     if not success:
@@ -384,11 +420,23 @@ def reset_circuit_breaker_endpoint(req: ResetCircuitBreakerRequest):
     return {"status": "ACTIVE", "message": "Circuit breaker reset to ACTIVE."}
 
 
-@app.post("/admin/approve-live")
+@app.post("/admin/approve-live", dependencies=[Depends(require_api_key)])
 def approve_live_trading(req: ApproveLiveRequest, db: Session = Depends(get_db)):
     """Required human approval signature for live trading authorization."""
     if len(req.digital_signature) < 16:
         raise HTTPException(status_code=400, detail="Digital signature must be at least 16 characters")
+
+    # Cryptographic HMAC signature check if signature is in standard hmac_sha256 format
+    if req.digital_signature.startswith("hmac_sha256:"):
+        sig = req.digital_signature.split(":", 1)[1]
+        payload_msg = f"{req.approved_by}:{req.notes}"
+        expected = hmac.new(
+            settings.ADMIN_HMAC_SECRET.encode("utf-8"),
+            payload_msg.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(sig, expected):
+            raise HTTPException(status_code=400, detail="Cryptographic HMAC signature verification failed")
 
     approval = ApprovalModel(
         approval_id=f"appr_{uuid.uuid4().hex[:8]}",

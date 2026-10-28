@@ -232,10 +232,12 @@ class BacktestEngine:
         oos_equity, oos_trades, oos_costs = self.simulate(strategy, oos_df)
         oos_metrics = calculate_performance_metrics(oos_equity, oos_trades, self.initial_capital)
 
-        # Degradation metric
+        # Degradation metric (only well-defined when In-Sample Sharpe is positive and significant)
         if is_metrics.sharpe_ratio > 0.1:
             deg = ((is_metrics.sharpe_ratio - oos_metrics.sharpe_ratio) / is_metrics.sharpe_ratio) * 100.0
             oos_metrics.oos_degradation_pct = round(max(0.0, deg), 2)
+        else:
+            oos_metrics.oos_degradation_pct = None
 
         # 3. Champion Acceptance Criteria Evaluation
         rejection_reasons: List[str] = []

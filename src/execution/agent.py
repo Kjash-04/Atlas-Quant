@@ -40,6 +40,11 @@ class ExecutionAgent:
                 self.adapter = MT5ExecutionAdapter()
         self.adapter.connect()
 
+    def update_broker_heartbeat(self) -> None:
+        """Explicit broker heartbeat ping, decoupling health monitoring from order gating."""
+        if self.adapter.is_connected:
+            self.risk.update_broker_heartbeat()
+
     def process_order_intent(
         self,
         intent: OrderIntent,
@@ -51,13 +56,26 @@ class ExecutionAgent:
         Executes order strictly gated by RiskEngine.
         If RiskEngine rejects, NEVER passes order to broker.
         """
+        # 0. Direct connectivity gate
+        if not self.adapter.is_connected:
+            logger.warning(f"ExecutionAgent: Broker adapter disconnected. OrderIntent {intent.intent_id} blocked.")
+            return OrderExecutionResult(
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                side=intent.side,
+                executed_lots=0.0,
+                executed_price=0.0,
+                spread_paid_pips=0.0,
+                slippage_pips=0.0,
+                commission_usd=0.0,
+                status="REJECTED",
+                error_message="Broker connection offline",
+            )
+
         recent_trades = recent_trades or []
         account_info = self.adapter.get_account_info()
 
-        # Update heartbeat
-        self.risk.update_broker_heartbeat()
-
-        # 1. Evaluate RiskEngine Gate
+        # 1. Evaluate RiskEngine Gate (independent broker heartbeat check)
         risk_result = self.risk.check(
             intent=intent,
             account_info=account_info,
@@ -81,9 +99,11 @@ class ExecutionAgent:
                 error_message=f"RiskGate Rejection: {risk_result.reason}",
             )
 
-        # 2. Risk Passed -> Dispatch to Execution Adapter
+        # 2. Risk Passed -> Dispatch to Execution Adapter with live snapshot
         logger.info(f"RiskEngine APPROVED OrderIntent {intent.intent_id} for {risk_result.approved_lots} lots.")
-        exec_result = self.adapter.send_order(intent, approved_lots=risk_result.approved_lots)
+        exec_result = self.adapter.send_order(
+            intent, approved_lots=risk_result.approved_lots, snapshot=snapshot
+        )
 
         # 3. Persist Trade Record if Filled
         if exec_result.status == "FILLED":

@@ -38,7 +38,7 @@ class RiskEngine:
 
     def reset_circuit_breaker(self, token: str) -> bool:
         """Reset circuit breaker with authorization token."""
-        if token == "ADMIN_RESET_CONFIRMED":
+        if token == settings.ADMIN_RESET_TOKEN:
             self.circuit_status = CircuitBreakerStatus.ACTIVE
             self.kill_switch_engaged = False
             logger.info("Circuit breaker manually reset to ACTIVE.")
@@ -182,6 +182,8 @@ class RiskEngine:
             equity=equity,
             stop_distance_price=stop_dist,
             risk_fraction=settings.RISK_PER_TRADE_FRACTION,
+            current_price=snapshot.close,
+            max_position_equity_pct=settings.RISK_MAX_POSITION_EQUITY_PCT,
         )
 
         if approved_lots <= 0:
@@ -227,7 +229,7 @@ class RiskEngine:
         try:
             record = db.query(ApprovalModel).filter(
                 ApprovalModel.action == "ENABLE_LIVE_TRADING",
-                ApprovalModel.is_revoked == False
+                ApprovalModel.is_revoked.is_(False),
             ).first()
             return record is not None and len(record.digital_signature) > 10
         except Exception:

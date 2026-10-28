@@ -9,8 +9,9 @@ from __future__ import annotations
 import logging
 import random
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from src.execution.base import BaseExecutionAdapter
+from src.schemas.market import MarketSnapshot
 from src.schemas.trade import OrderExecutionResult, OrderIntent, OrderSide
 
 logger = logging.getLogger(__name__)
@@ -33,7 +34,12 @@ class PaperAdapter(BaseExecutionAdapter):
     def disconnect(self) -> None:
         self.is_connected = False
 
-    def send_order(self, intent: OrderIntent, approved_lots: float) -> OrderExecutionResult:
+    def send_order(
+        self,
+        intent: OrderIntent,
+        approved_lots: float,
+        snapshot: Optional[MarketSnapshot] = None,
+    ) -> OrderExecutionResult:
         if not self.is_connected:
             return OrderExecutionResult(
                 intent_id=intent.intent_id,
@@ -51,9 +57,14 @@ class PaperAdapter(BaseExecutionAdapter):
         self.ticket_counter += 1
         ticket = self.ticket_counter
 
-        # Realistic spread and slippage simulation
-        base_price = 1.0850 if intent.symbol == "EURUSD" else 1.2550
-        spread_pips = 1.2
+        # Realistic spread and fill price simulation from live snapshot
+        if snapshot is not None:
+            base_price = snapshot.close
+            spread_pips = round(snapshot.spread * 10000.0, 2)
+        else:
+            base_price = getattr(intent, "price", None) or (1.0850 if intent.symbol == "EURUSD" else 1.2550)
+            spread_pips = 1.2
+
         slippage_pips = round(random.uniform(0.1, 0.6), 2)
         pip_val = 0.0001
 

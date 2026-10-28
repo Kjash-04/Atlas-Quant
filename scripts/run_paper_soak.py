@@ -40,6 +40,7 @@ def main():
 
     iterations = 5
     for i in range(iterations):
+        execution_agent.update_broker_heartbeat()
         row = df.iloc[i]
         payload = {
             "symbol": "EURUSD",

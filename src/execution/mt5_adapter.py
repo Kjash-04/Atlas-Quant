@@ -67,7 +67,12 @@ class MT5ExecutionAdapter(BaseExecutionAdapter):
             self.is_connected = False
             logger.info("MetaTrader 5 connection closed.")
 
-    def send_order(self, intent: OrderIntent, approved_lots: float) -> OrderExecutionResult:
+    def send_order(
+        self,
+        intent: OrderIntent,
+        approved_lots: float,
+        snapshot: Optional[MarketSnapshot] = None,
+    ) -> OrderExecutionResult:
         """
         Sends order request to MetaTrader 5 terminal using mt5.order_send with retry backoff.
         """

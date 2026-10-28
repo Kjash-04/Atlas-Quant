@@ -290,7 +290,20 @@ class SelfImprovementOrchestrator:
         return self.graph.invoke(state)
 
 
-self_improvement_graph = SelfImprovementOrchestrator()
+class _LazyOrchestrator:
+    def __init__(self):
+        self._instance: Optional[SelfImprovementOrchestrator] = None
+
+    def _get(self) -> SelfImprovementOrchestrator:
+        if self._instance is None:
+            self._instance = SelfImprovementOrchestrator()
+        return self._instance
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get(), name)
+
+
+self_improvement_graph = _LazyOrchestrator()
 
 
 if __name__ == "__main__":

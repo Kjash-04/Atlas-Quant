@@ -6,7 +6,8 @@ Abstracts communication with brokers and paper trading simulation.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+from src.schemas.market import MarketSnapshot
 from src.schemas.trade import OrderExecutionResult, OrderIntent
 
 
@@ -20,7 +21,12 @@ class BaseExecutionAdapter(ABC):
         pass
 
     @abstractmethod
-    def send_order(self, intent: OrderIntent, approved_lots: float) -> OrderExecutionResult:
+    def send_order(
+        self,
+        intent: OrderIntent,
+        approved_lots: float,
+        snapshot: Optional[MarketSnapshot] = None,
+    ) -> OrderExecutionResult:
         pass
 
     @abstractmethod

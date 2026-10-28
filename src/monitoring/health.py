@@ -42,10 +42,12 @@ class SystemHealthMonitor:
             db_ok = False
             incidents.append(f"Database connectivity error: {e}")
 
-        # 2. Broker Connection
+        # 2. Broker Connection & Heartbeat Refresh
         broker_ok = execution_agent.adapter.is_connected
         if not broker_ok:
             incidents.append("Broker execution adapter disconnected.")
+        else:
+            execution_agent.update_broker_heartbeat()
 
         # 3. Circuit Breaker
         cb_status = risk_engine.circuit_status
