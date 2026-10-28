@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 import json
+import hmac
 
 from src.config import settings
 from src.core.llm_budget import budget_guard
@@ -85,13 +86,28 @@ st.sidebar.metric(
 
 st.sidebar.divider()
 st.sidebar.subheader("Emergency Controls")
-if st.sidebar.button("🚨 Engage Kill Switch", type="primary"):
-    execution_agent.emergency_flatten_and_kill(reason="Triggered from Streamlit Dashboard")
-    st.sidebar.error("Kill Switch Engaged! All orders blocked.")
+admin_token_input = st.sidebar.text_input("Admin Token", type="password", help="Required for emergency controls")
+buttons_disabled = not bool(admin_token_input and admin_token_input.strip())
 
-if st.sidebar.button("🔄 Reset Circuit Breaker"):
-    if risk_engine.reset_circuit_breaker("ADMIN_RESET_CONFIRMED"):
-        st.sidebar.success("Circuit Breaker reset to ACTIVE.")
+if st.sidebar.button("🚨 Engage Kill Switch", type="primary", disabled=buttons_disabled):
+    token_str = admin_token_input.strip()
+    kill_matched = bool(settings.ADMIN_EMERGENCY_KILL_TOKEN and hmac.compare_digest(token_str, settings.ADMIN_EMERGENCY_KILL_TOKEN))
+    reset_matched = bool(settings.ADMIN_RESET_TOKEN and hmac.compare_digest(token_str, settings.ADMIN_RESET_TOKEN))
+    if kill_matched or reset_matched:
+        execution_agent.emergency_flatten_and_kill(reason="Triggered from Streamlit Dashboard")
+        st.sidebar.error("Kill Switch Engaged! All orders blocked.")
+    else:
+        st.sidebar.error("Invalid Admin Token.")
+
+if st.sidebar.button("🔄 Reset Circuit Breaker", disabled=buttons_disabled):
+    token_str = admin_token_input.strip()
+    if settings.ADMIN_RESET_TOKEN and hmac.compare_digest(token_str, settings.ADMIN_RESET_TOKEN):
+        if risk_engine.reset_circuit_breaker(token_str):
+            st.sidebar.success("Circuit Breaker reset to ACTIVE.")
+        else:
+            st.sidebar.error("Failed to reset Circuit Breaker.")
+    else:
+        st.sidebar.error("Invalid Admin Reset Token.")
 
 # Main Application Tabs
 tab_overview, tab_agents, tab_risk, tab_llm, tab_alerts = st.tabs([

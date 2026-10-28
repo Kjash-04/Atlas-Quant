@@ -62,6 +62,7 @@ class Settings:
         self.MT5_PASSWORD: str = os.getenv("MT5_PASSWORD", "demo_password")
         self.MT5_SERVER: str = os.getenv("MT5_SERVER", "MetaQuotes-Demo")
         self.MT5_TIMEOUT_MS: int = _get_int("MT5_TIMEOUT_MS", 60000)
+        self.BROKER_HEARTBEAT_INTERVAL_SEC: int = _get_int("BROKER_HEARTBEAT_INTERVAL_SEC", 15)
 
         # LLM Routing (Two Keys - $0 net spend) - with fallbacks for alternative starter naming
         gemini_free = os.getenv("GEMINI_FREE_API_KEY") or os.getenv("GEMINI_API_KEY", "")
@@ -95,10 +96,10 @@ class Settings:
         self.RISK_ALLOWED_SESSIONS: str = os.getenv("RISK_ALLOWED_SESSIONS", "LONDON,NEW_YORK,OVERLAP_LDN_NY")
 
         # Admin & Safety Secret Tokens (Externalized for security)
-        self.ADMIN_API_KEY: str = os.getenv("ADMIN_API_KEY", "")
-        self.ADMIN_EMERGENCY_KILL_TOKEN: str = os.getenv("ADMIN_EMERGENCY_KILL_TOKEN", "EMERGENCY_KILL_AUTHORIZED")
-        self.ADMIN_RESET_TOKEN: str = os.getenv("ADMIN_RESET_TOKEN", "ADMIN_RESET_CONFIRMED")
-        self.ADMIN_HMAC_SECRET: str = os.getenv("ADMIN_HMAC_SECRET", "atlas_quant_admin_hmac_secret_2026")
+        self.ADMIN_API_KEY: str = (os.getenv("ADMIN_API_KEY") or "").strip()
+        self.ADMIN_EMERGENCY_KILL_TOKEN: str = (os.getenv("ADMIN_EMERGENCY_KILL_TOKEN") or "").strip()
+        self.ADMIN_RESET_TOKEN: str = (os.getenv("ADMIN_RESET_TOKEN") or "").strip()
+        self.ADMIN_HMAC_SECRET: str = (os.getenv("ADMIN_HMAC_SECRET") or "").strip()
 
         # Alerts
         self.ALERT_TELEGRAM_BOT_TOKEN: str = os.getenv("ALERT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")

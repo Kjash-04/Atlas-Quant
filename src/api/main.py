@@ -6,9 +6,11 @@ trade execution, LLM call auditing, and administrative safety controls.
 
 from __future__ import annotations
 
-import uuid
+import asyncio
+import contextlib
 import hashlib
 import hmac
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -40,12 +42,35 @@ from src.risk_engine.engine import risk_engine
 from src.schemas.market import MarketSnapshot
 from src.schemas.trade import OrderExecutionResult, OrderIntent
 
+logger = logging.getLogger(__name__)
+
+
+async def _heartbeat_loop(stop: asyncio.Event) -> None:
+    """Background heartbeat ticker to keep broker heartbeat fresh."""
+    while not stop.is_set():
+        try:
+            await asyncio.to_thread(execution_agent.update_broker_heartbeat)
+        except Exception as exc:
+            logger.warning("Heartbeat update failed: %s", exc)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=float(settings.BROKER_HEARTBEAT_INTERVAL_SEC))
+        except (asyncio.TimeoutError, TimeoutError):
+            pass
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager replacing deprecated on_event startup/shutdown."""
     init_db()
-    yield
+    stop_event = asyncio.Event()
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(stop_event))
+    try:
+        yield
+    finally:
+        stop_event.set()
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
 
 
 # Initialize FastAPI App
@@ -77,7 +102,10 @@ def require_api_key(
 ) -> bool:
     """Authenticates admin and privileged order endpoints when ADMIN_API_KEY is configured."""
     if not settings.ADMIN_API_KEY:
-        return True  # Dev mode / unauthenticated local development
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Admin API disabled: ADMIN_API_KEY is not configured on the server.",
+        )
 
     token = x_api_key
     if not token and authorization:
@@ -86,12 +114,26 @@ def require_api_key(
         else:
             token = authorization.strip()
 
-    if token != settings.ADMIN_API_KEY:
+    if not token or not hmac.compare_digest(token, settings.ADMIN_API_KEY):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized: Missing or invalid API key",
         )
     return True
+
+
+def require_admin_token(configured: str, supplied: str, what: str = "Admin token") -> None:
+    """Validates admin token with fail-closed checks using constant-time comparison."""
+    if not configured:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"{what} is not configured on the server.",
+        )
+    if not supplied or not hmac.compare_digest(supplied, configured):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Invalid {what.lower()}",
+        )
 
 
 # ------------------------------------------------------------------------------
@@ -401,8 +443,7 @@ def get_metrics_summary(db: Session = Depends(get_db)):
 @app.post("/admin/kill", dependencies=[Depends(require_api_key)])
 def emergency_kill(req: KillRequest):
     """Emergency kill switch endpoint: flattens positions and halts engine."""
-    if req.admin_token != settings.ADMIN_EMERGENCY_KILL_TOKEN:
-        raise HTTPException(status_code=403, detail="Invalid admin authorization token")
+    require_admin_token(settings.ADMIN_EMERGENCY_KILL_TOKEN, req.admin_token, "Emergency kill token")
     closed = execution_agent.emergency_flatten_and_kill(reason=req.reason)
     alert_dispatcher.dispatch("SEV-1", "EMERGENCY KILL SWITCH ENGAGED", req.reason)
     return {
@@ -414,6 +455,7 @@ def emergency_kill(req: KillRequest):
 
 @app.post("/admin/reset-circuit-breaker", dependencies=[Depends(require_api_key)])
 def reset_circuit_breaker_endpoint(req: ResetCircuitBreakerRequest):
+    require_admin_token(settings.ADMIN_RESET_TOKEN, req.admin_token, "Reset token")
     success = risk_engine.reset_circuit_breaker(token=req.admin_token)
     if not success:
         raise HTTPException(status_code=400, detail="Invalid reset token")
@@ -423,20 +465,30 @@ def reset_circuit_breaker_endpoint(req: ResetCircuitBreakerRequest):
 @app.post("/admin/approve-live", dependencies=[Depends(require_api_key)])
 def approve_live_trading(req: ApproveLiveRequest, db: Session = Depends(get_db)):
     """Required human approval signature for live trading authorization."""
-    if len(req.digital_signature) < 16:
-        raise HTTPException(status_code=400, detail="Digital signature must be at least 16 characters")
+    if not settings.ADMIN_HMAC_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Live approval disabled: ADMIN_HMAC_SECRET is not configured on the server.",
+        )
 
-    # Cryptographic HMAC signature check if signature is in standard hmac_sha256 format
-    if req.digital_signature.startswith("hmac_sha256:"):
-        sig = req.digital_signature.split(":", 1)[1]
-        payload_msg = f"{req.approved_by}:{req.notes}"
-        expected = hmac.new(
-            settings.ADMIN_HMAC_SECRET.encode("utf-8"),
-            payload_msg.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(sig, expected):
-            raise HTTPException(status_code=400, detail="Cryptographic HMAC signature verification failed")
+    prefix, _, sig = req.digital_signature.partition(":")
+    if prefix != "hmac_sha256" or not sig:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Digital signature must follow format 'hmac_sha256:<hex>'",
+        )
+
+    payload_msg = f"{req.approved_by}:{req.notes}"
+    expected = hmac.new(
+        settings.ADMIN_HMAC_SECRET.encode("utf-8"),
+        payload_msg.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig.lower(), expected.lower()):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cryptographic HMAC signature verification failed",
+        )
 
     approval = ApprovalModel(
         approval_id=f"appr_{uuid.uuid4().hex[:8]}",

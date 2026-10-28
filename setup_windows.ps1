@@ -26,6 +26,10 @@ if (-not (Test-Path ".env")) {
     Write-Host "  -> .env file already exists." -ForegroundColor Green
 }
 
+# 2b. Generate or Rotate Admin Secrets
+Write-Host "`n[2b/5] Ensuring secure random secrets in .env..." -ForegroundColor Yellow
+python scripts/gen_secrets.py
+
 # 3. Install Python Dependencies
 Write-Host "`n[3/5] Installing dependencies via pip..." -ForegroundColor Yellow
 python -m pip install -r requirements.txt
