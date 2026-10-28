@@ -1,0 +1,34 @@
+# Atlas-Quant Core Dependencies
+# Python 3.11+ 64-bit on Windows x64
+
+# Web & API Framework
+fastapi>=0.115.0
+uvicorn>=0.30.0
+pydantic>=2.8.0
+pydantic-settings>=2.4.0
+python-multipart>=0.0.9
+
+# Database & Storage
+sqlalchemy>=2.0.30
+pyyaml>=6.0.1
+python-dotenv>=1.0.1
+
+# Numeric & Financial Computations
+numpy>=1.26.0
+pandas>=2.2.0
+
+# LLM & Multi-Agent Orchestration
+google-genai>=0.1.1
+langgraph>=0.2.0
+langchain-core>=0.2.0
+
+# Broker Connectivity (Windows x64 Native)
+MetaTrader5>=5.0.45
+
+# Interactive Visualization & UI
+streamlit>=1.38.0
+
+# Testing & Quality Assurance
+pytest>=8.3.0
+pytest-asyncio>=0.23.0
+httpx>=0.27.0

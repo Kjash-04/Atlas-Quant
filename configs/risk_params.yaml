@@ -1,0 +1,32 @@
+# Strict Risk Engine Parameters
+# Note: These parameters are strictly immutable by the LLM self-improvement loop.
+# Any modification requires manual human review and approval.
+
+circuit_breakers:
+  max_daily_loss_pct: 0.03       # 3% of starting daily equity -> Status PAUSED
+  max_drawdown_pct: 0.10         # 10% peak-to-trough -> Status HALTED
+  heartbeat_timeout_sec: 30
+  data_stale_threshold_sec: 120
+
+trade_filters:
+  max_open_positions: 3
+  max_daily_trades: 10
+  max_correlated_positions: 1
+  max_spread_pips: 2.5
+  news_blackout_minutes: 30
+  allowed_sessions:
+    - "LONDON"
+    - "NEW_YORK"
+
+position_sizing:
+  model: "fixed_fractional"
+  risk_per_trade_fraction: 0.01  # Risk exactly 1% of total equity
+  max_position_equity_pct: 0.05  # Maximum nominal exposure per trade
+  min_lot: 0.01
+  max_lot: 5.00
+  lot_step: 0.01
+
+execution_gates:
+  paper_trading_only: true
+  live_trading_allowed: false
+  require_signed_human_token: true

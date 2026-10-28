@@ -1,0 +1,36 @@
+project:
+  name: "Atlas-Quant"
+  version: "1.0.0"
+  output_mode: "BUILD"
+  disclaimer: "Research/educational only. Not financial advice. Past performance does not guarantee future results. Live trading requires explicit human approval."
+
+orchestrator:
+  max_cycles_per_day: 5
+  max_pending_challengers: 2
+  consecutive_reverts_cooldown: 3
+  heartbeat_interval_sec: 15
+
+llm_router:
+  routine_model: "gemini-3.8-flash"
+  deep_model: "gemini-4-argon"
+  deep_calls_daily_cap: 20
+  budget_cap_usd: 0.00
+  cache_enabled: true
+  cache_dir: "./data/llm_cache"
+
+backtest:
+  is_ratio: 0.60
+  oos_ratio: 0.20
+  test_ratio: 0.20
+  min_trades_per_regime: 30
+  max_drawdown_limit: 0.15
+  min_oos_sharpe_ratio: 0.70
+  walk_forward:
+    train_bars: 2000
+    val_bars: 500
+    folds: 4
+  costs:
+    commission_per_lot_usd: 3.50
+    default_spread_pips: 1.2
+    slippage_base_pips: 0.5
+    slippage_vol_factor: 0.05
