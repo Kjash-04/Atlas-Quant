@@ -315,3 +315,5 @@ The LLM is **never** permitted to send orders directly to MetaTrader 5. All trad
 
 ---
 *Atlas-Quant — Built with Google Gemini 4 Argon & Gemini 3.8 Flash.*
+#   A t l a s - Q u a n t  
+ 
