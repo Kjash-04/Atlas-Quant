@@ -37,7 +37,17 @@ class EmaRsiTrendStrategy(BaseStrategy):
         if len(df) < 15:
             return signals
 
-        # Causal feature extraction
+        # Spec-driven rule evaluation: When StrategySpec contains custom rules, execute them dynamically
+        if self.spec.entry_rules:
+            long_cond = self.evaluate_rule_set(self.spec.entry_rules, self.spec.entry_logic, df)
+            signals[long_cond] = 1
+
+            if self.spec.exit_rules:
+                exit_cond = self.evaluate_rule_set(self.spec.exit_rules, self.spec.exit_logic, df)
+                signals[exit_cond & (signals != 0)] = 0
+            return signals
+
+        # Default fallback: EMA Crossover + RSI + ATR percentile baseline filter
         ema_fast = df["ema_20"]
         ema_slow = df["ema_50"]
         rsi = df["rsi_14"]

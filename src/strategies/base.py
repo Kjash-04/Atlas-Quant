@@ -6,12 +6,15 @@ All executable strategies must subclass BaseStrategy and strictly adhere to dete
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Tuple
+import logging
+from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
 from src.schemas.market import MarketSnapshot
-from src.schemas.strategy import StrategySpec
+from src.schemas.strategy import Rule, RuleLogic, StrategySpec
+
+logger = logging.getLogger(__name__)
 
 
 class BaseStrategy(ABC):
@@ -36,6 +39,69 @@ class BaseStrategy(ABC):
                 0  = Neutral / Flat
         """
         pass
+
+    def evaluate_rule(self, rule: Rule, df: pd.DataFrame) -> pd.Series:
+        """
+        Vectorized evaluation of a deterministic Rule against a DataFrame.
+        Produces a boolean pd.Series.
+        """
+        feat = rule.feature.lower()
+        if feat not in df.columns:
+            logger.warning(f"Feature '{feat}' not found in DataFrame columns.")
+            return pd.Series(False, index=df.index)
+
+        feat_series = df[feat]
+
+        # Value can be a numeric scalar or another column name (e.g. 'ema_50')
+        if isinstance(rule.value, str) and rule.value.lower() in df.columns:
+            val = df[rule.value.lower()]
+        else:
+            try:
+                val = float(rule.value)
+            except (ValueError, TypeError):
+                val = rule.value
+
+        op = rule.operator.upper().strip()
+        if op == ">":
+            return feat_series > val
+        elif op == "<":
+            return feat_series < val
+        elif op == ">=":
+            return feat_series >= val
+        elif op == "<=":
+            return feat_series <= val
+        elif op == "==":
+            return feat_series == val
+        elif op == "!=":
+            return feat_series != val
+        elif op == "CROSS_ABOVE":
+            prev_feat = feat_series.shift(1)
+            prev_val = val.shift(1) if isinstance(val, pd.Series) else val
+            return (prev_feat <= prev_val) & (feat_series > val)
+        elif op == "CROSS_BELOW":
+            prev_feat = feat_series.shift(1)
+            prev_val = val.shift(1) if isinstance(val, pd.Series) else val
+            return (prev_feat >= prev_val) & (feat_series < val)
+        else:
+            logger.warning(f"Unsupported rule operator: {op}")
+            return pd.Series(False, index=df.index)
+
+    def evaluate_rule_set(self, rules: List[Rule], logic: RuleLogic, df: pd.DataFrame) -> pd.Series:
+        """Evaluates a list of rules combined by RuleLogic (AND / OR)."""
+        if not rules:
+            return pd.Series(False, index=df.index)
+
+        series_list = [self.evaluate_rule(r, df) for r in rules]
+        if logic == RuleLogic.OR:
+            res = pd.Series(False, index=df.index)
+            for s in series_list:
+                res = res | s
+            return res
+        else:  # AND
+            res = pd.Series(True, index=df.index)
+            for s in series_list:
+                res = res & s
+            return res
 
     def size_position(self, equity: float, atr: float, symbol_info: Optional[Dict[str, Any]] = None) -> float:
         """

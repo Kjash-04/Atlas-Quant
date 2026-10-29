@@ -16,6 +16,11 @@ from src.schemas.trade import OrderExecutionResult, OrderIntent, OrderSide
 
 logger = logging.getLogger(__name__)
 
+SUPPORTED_SYMBOLS: set[str] = {
+    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD",
+    "USDCHF", "NZDUSD", "EURGBP", "EURJPY", "GBPJPY"
+}
+
 
 class PaperAdapter(BaseExecutionAdapter):
     def __init__(self, initial_balance: float = 100000.0):
@@ -52,6 +57,20 @@ class PaperAdapter(BaseExecutionAdapter):
                 commission_usd=0.0,
                 status="REJECTED",
                 error_message="PaperAdapter disconnected",
+            )
+
+        if intent.symbol.upper() not in SUPPORTED_SYMBOLS:
+            return OrderExecutionResult(
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                side=intent.side,
+                executed_lots=0.0,
+                executed_price=0.0,
+                spread_paid_pips=0.0,
+                slippage_pips=0.0,
+                commission_usd=0.0,
+                status="REJECTED",
+                error_message=f"PaperAdapter: Unsupported symbol '{intent.symbol}'",
             )
 
         self.ticket_counter += 1

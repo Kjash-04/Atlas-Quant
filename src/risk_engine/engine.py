@@ -18,9 +18,14 @@ from src.risk_engine.rules import RiskGateCheckResult, RiskRuleViolation
 from src.risk_engine.sizing import calculate_risk_sized_lots
 from src.schemas.market import MarketSnapshot
 from src.schemas.system import CircuitBreakerStatus
-from src.schemas.trade import OrderIntent
+from src.schemas.trade import OrderIntent, OrderSide
 
 logger = logging.getLogger(__name__)
+
+SUPPORTED_SYMBOLS: Set[str] = {
+    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD",
+    "USDCHF", "NZDUSD", "EURGBP", "EURJPY", "GBPJPY"
+}
 
 
 class RiskEngine:
@@ -78,6 +83,49 @@ class RiskEngine:
                 violation=RiskRuleViolation.CIRCUIT_BREAKER_PAUSED,
                 reason="Circuit breaker is PAUSED (e.g. daily loss limit hit).",
             )
+
+        # 1b. Symbol & Parameter Sanity Checks
+        if intent.symbol.upper() not in SUPPORTED_SYMBOLS:
+            return RiskGateCheckResult(
+                approved=False,
+                violation=RiskRuleViolation.UNSUPPORTED_SYMBOL,
+                reason=f"Symbol '{intent.symbol}' is not supported.",
+            )
+
+        if intent.requested_lots is not None and intent.requested_lots <= 0:
+            return RiskGateCheckResult(
+                approved=False,
+                violation=RiskRuleViolation.LOT_SIZE_OUT_OF_BOUNDS,
+                reason=f"Requested lot size {intent.requested_lots} is invalid (must be > 0).",
+            )
+
+        # Bracket Price Direction Sanity Checks
+        if intent.side == OrderSide.BUY:
+            if intent.stop_loss_price is not None and intent.stop_loss_price >= snapshot.close:
+                return RiskGateCheckResult(
+                    approved=False,
+                    violation=RiskRuleViolation.INVALID_BRACKET_PRICES,
+                    reason=f"BUY stop-loss price ({intent.stop_loss_price}) must be below current entry price ({snapshot.close}).",
+                )
+            if intent.take_profit_price is not None and intent.take_profit_price <= snapshot.close:
+                return RiskGateCheckResult(
+                    approved=False,
+                    violation=RiskRuleViolation.INVALID_BRACKET_PRICES,
+                    reason=f"BUY take-profit price ({intent.take_profit_price}) must be above current entry price ({snapshot.close}).",
+                )
+        elif intent.side == OrderSide.SELL:
+            if intent.stop_loss_price is not None and intent.stop_loss_price <= snapshot.close:
+                return RiskGateCheckResult(
+                    approved=False,
+                    violation=RiskRuleViolation.INVALID_BRACKET_PRICES,
+                    reason=f"SELL stop-loss price ({intent.stop_loss_price}) must be above current entry price ({snapshot.close}).",
+                )
+            if intent.take_profit_price is not None and intent.take_profit_price >= snapshot.close:
+                return RiskGateCheckResult(
+                    approved=False,
+                    violation=RiskRuleViolation.INVALID_BRACKET_PRICES,
+                    reason=f"SELL take-profit price ({intent.take_profit_price}) must be below current entry price ({snapshot.close}).",
+                )
 
         # 2. Broker Heartbeat & Data Freshness
         now_utc = datetime.now(timezone.utc)
@@ -178,7 +226,7 @@ class RiskEngine:
         stop_dist = abs(intent.stop_loss_price - snapshot.close) if intent.stop_loss_price else (snapshot.indicators.atr_14 or 0.0015) * 1.5
         stop_dist = max(stop_dist, 0.0004)  # Minimum 4 pips
 
-        approved_lots = calculate_risk_sized_lots(
+        max_risk_lots = calculate_risk_sized_lots(
             equity=equity,
             stop_distance_price=stop_dist,
             risk_fraction=settings.RISK_PER_TRADE_FRACTION,
@@ -186,11 +234,28 @@ class RiskEngine:
             max_position_equity_pct=settings.RISK_MAX_POSITION_EQUITY_PCT,
         )
 
+        if max_risk_lots <= 0:
+            return RiskGateCheckResult(
+                approved=False,
+                violation=RiskRuleViolation.LOT_SIZE_OUT_OF_BOUNDS,
+                reason=f"Calculated risk lot size {max_risk_lots} is invalid.",
+            )
+
+        # Honor requested_lots if provided, capped to risk-permitted maximum
+        if intent.requested_lots is not None and intent.requested_lots > 0:
+            approved_lots = round(min(intent.requested_lots, max_risk_lots), 2)
+            if intent.requested_lots > max_risk_lots:
+                logger.warning(
+                    f"Requested lots {intent.requested_lots} capped to risk-permitted maximum {approved_lots}."
+                )
+        else:
+            approved_lots = max_risk_lots
+
         if approved_lots <= 0:
             return RiskGateCheckResult(
                 approved=False,
                 violation=RiskRuleViolation.LOT_SIZE_OUT_OF_BOUNDS,
-                reason=f"Calculated lot size {approved_lots} is invalid.",
+                reason=f"Approved lot size {approved_lots} is below minimum allowed.",
             )
 
         # 9. Idempotency Check

@@ -28,7 +28,7 @@ from src.backtest.engine import BacktestEngine
 from src.core.audit import audit_logger
 from src.core.llm_budget import budget_guard, BudgetExhaustedError
 from src.database.connection import SessionLocal
-from src.database.models import StrategyVersionModel
+from src.database.models import StrategyVersionModel, TradeModel, MarketSnapshotModel, BacktestRunModel
 from src.schemas.hypothesis import Hypothesis, HypothesisStatus
 from src.schemas.strategy import StrategySpec
 from src.self_improvement.critic import ReasoningCritic
@@ -41,22 +41,78 @@ logger = logging.getLogger(__name__)
 
 
 class SelfImprovementOrchestrator:
-    def __init__(self, data_df: Optional[pd.DataFrame] = None):
+    def __init__(
+        self,
+        data_df: Optional[pd.DataFrame] = None,
+        db: Optional[Session] = None,
+    ):
         self.critic = ReasoningCritic()
         self.memory = memory_agent
         self.coder = StrategyCoderAgent()
         self.backtester = BacktestEngine()
         self.data_df = data_df if data_df is not None else pd.DataFrame()
+        self.db = db
         self.graph = self._build_graph()
 
     # --- Node 1: Observe (Gemini 3.8 Flash Free) ---
     def observe_node(self, state: SelfImprovementState) -> Dict[str, Any]:
         logger.info(f"[{state.get('cycle_id')}] Step 1: Observe residuals...")
         strategy_id = state.get("strategy_id", "strat_default")
+
+        # Query real historical trades and latest market snapshot
+        trade_logs = []
+        market_context = {"active_regime": "RANGING_HIGH_VOL", "recent_vol": "ELEVATED"}
+        db = self.db or SessionLocal()
+        own_session = self.db is None
+        try:
+            trades = (
+                db.query(TradeModel)
+                .filter(TradeModel.strategy_id == strategy_id)
+                .order_by(TradeModel.entry_time.desc())
+                .limit(50)
+                .all()
+            )
+            for t in trades:
+                pnl = t.pnl_usd if t.pnl_usd is not None else 0.0
+                trade_logs.append({
+                    "trade_id": t.trade_id,
+                    "symbol": t.symbol,
+                    "side": t.side,
+                    "pnl": pnl,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "lots": t.lots,
+                    "session": "LONDON_NY",
+                    "atr_pct": 50.0,
+                })
+
+            snap = (
+                db.query(MarketSnapshotModel)
+                .order_by(MarketSnapshotModel.timestamp_utc.desc())
+                .first()
+            )
+            if snap:
+                market_context = {
+                    "active_regime": snap.regime_label or "RANGING_HIGH_VOL",
+                    "symbol": snap.symbol,
+                    "close": snap.close,
+                    "spread": snap.spread,
+                    "recent_vol": "ELEVATED" if "HIGH_VOL" in (snap.regime_label or "") else "NORMAL",
+                }
+        except Exception as e:
+            logger.warning(f"Failed querying database in observe_node: {e}")
+        finally:
+            if own_session:
+                db.close()
+
+        # Baseline fallback if no trades recorded yet
+        if not trade_logs:
+            trade_logs = [{"trade": 1, "pnl": -45.0, "atr_pct": 89.2, "session": "OVERLAP_LDN_NY"}]
+
         residuals = self.critic.observe_residuals(
             strategy_id=strategy_id,
-            trade_logs=[{"trade": 1, "pnl": -45.0, "atr_pct": 89.2, "session": "OVERLAP_LDN_NY"}],
-            market_context={"active_regime": "RANGING_HIGH_VOL", "recent_vol": "ELEVATED"},
+            trade_logs=trade_logs,
+            market_context=market_context,
         )
         return {
             "observed_residuals": residuals,
@@ -171,15 +227,44 @@ class SelfImprovementOrchestrator:
         strategy = EmaRsiTrendStrategy(spec)
         bt_res = self.backtester.run_validation_pipeline(strategy, df)
 
-        champ_metrics = state.get("champion_metrics") or {
-            "sharpe_ratio": 1.15,
-            "max_drawdown_pct": 12.0,
-            "expectancy_usd": 42.0,
-        }
+        champ_metrics = state.get("champion_metrics")
+        if not champ_metrics:
+            champ = self.memory.get_champion_version(spec.strategy_id, db=self.db)
+            if champ:
+                db_session = self.db or SessionLocal()
+                own_session = self.db is None
+                try:
+                    bt_run = (
+                        db_session.query(BacktestRunModel)
+                        .filter(BacktestRunModel.version_id == champ.version_id)
+                        .order_by(BacktestRunModel.created_at.desc())
+                        .first()
+                    )
+                    if bt_run and bt_run.oos_metrics:
+                        champ_metrics = {
+                            "sharpe_ratio": float(bt_run.oos_metrics.get("sharpe_ratio", 1.15)),
+                            "max_drawdown_pct": float(bt_run.oos_metrics.get("max_drawdown_pct", 11.8)),
+                            "expectancy_usd": float(bt_run.oos_metrics.get("expectancy_usd", 40.0)),
+                        }
+                except Exception as e:
+                    logger.warning(f"Failed fetching champion backtest from DB: {e}")
+                finally:
+                    if own_session:
+                        db_session.close()
+            if not champ_metrics:
+                champ_metrics = {
+                    "sharpe_ratio": 1.15,
+                    "max_drawdown_pct": 11.8,
+                    "expectancy_usd": 40.0,
+                }
+
+        def _pick_metric(val: Any, default: float = 0.0) -> float:
+            return default if val is None else float(val)
+
         chall_metrics = {
-            "sharpe_ratio": bt_res.oos_metrics.sharpe_ratio or 1.65,
-            "max_drawdown_pct": bt_res.oos_metrics.max_drawdown_pct or 8.2,
-            "expectancy_usd": bt_res.oos_metrics.expectancy_usd or 55.0,
+            "sharpe_ratio": _pick_metric(bt_res.oos_metrics.sharpe_ratio, 0.0),
+            "max_drawdown_pct": _pick_metric(bt_res.oos_metrics.max_drawdown_pct, 0.0),
+            "expectancy_usd": _pick_metric(bt_res.oos_metrics.expectancy_usd, 0.0),
         }
 
         return {
@@ -194,6 +279,17 @@ class SelfImprovementOrchestrator:
         logger.info(f"[{state.get('cycle_id')}] Step 6: Keep or Revert decision...")
         if state.get("is_budget_exhausted") or state.get("error"):
             return {"decision": "REVERT", "reason": state.get("error", "Budget exhausted or synthesis failed")}
+
+        # Enforce REVERT if backtest pipeline criteria failed
+        if not state.get("validation_passed", False):
+            consec = state.get("consecutive_reverts", 0) + 1
+            reason = "Validation pipeline failed champion acceptance criteria."
+            return {
+                "decision": "REVERT",
+                "reason": reason,
+                "consecutive_reverts": consec,
+                "audit_events": state.get("audit_events", []) + [f"KeepOrRevert: Decision=REVERT ({reason})"],
+            }
 
         decision, reason = self.critic.evaluate_keep_or_revert(
             champion_metrics=state.get("champion_metrics", {}),
@@ -279,11 +375,37 @@ class SelfImprovementOrchestrator:
 
     def run_cycle(self, initial_state: Optional[SelfImprovementState] = None) -> SelfImprovementState:
         """Executes one complete 7-step autonomous improvement cycle."""
+        strategy_id = "strat_ema_rsi"
+        champ = self.memory.get_champion_version(strategy_id, db=self.db)
+        champ_version_id = champ.version_id if champ else f"{strategy_id}_v1.0.0"
+        champ_metrics = {"sharpe_ratio": 1.15, "max_drawdown_pct": 11.8, "expectancy_usd": 40.0}
+        if champ:
+            db = self.db or SessionLocal()
+            own_session = self.db is None
+            try:
+                bt_run = (
+                    db.query(BacktestRunModel)
+                    .filter(BacktestRunModel.version_id == champ.version_id)
+                    .order_by(BacktestRunModel.created_at.desc())
+                    .first()
+                )
+                if bt_run and bt_run.oos_metrics:
+                    champ_metrics = {
+                        "sharpe_ratio": float(bt_run.oos_metrics.get("sharpe_ratio", 1.15)),
+                        "max_drawdown_pct": float(bt_run.oos_metrics.get("max_drawdown_pct", 11.8)),
+                        "expectancy_usd": float(bt_run.oos_metrics.get("expectancy_usd", 40.0)),
+                    }
+            except Exception as e:
+                logger.warning(f"Failed to fetch champion metrics from DB: {e}")
+            finally:
+                if own_session:
+                    db.close()
+
         state = initial_state or SelfImprovementState(
             cycle_id=f"cycle_{uuid.uuid4().hex[:8]}",
-            strategy_id="strat_ema_rsi",
-            champion_version_id="strat_ema_rsi_v1.0.0",
-            champion_metrics={"sharpe_ratio": 1.15, "max_drawdown_pct": 11.8, "expectancy_usd": 40.0},
+            strategy_id=strategy_id,
+            champion_version_id=champ_version_id,
+            champion_metrics=champ_metrics,
             consecutive_reverts=0,
             audit_events=[],
         )

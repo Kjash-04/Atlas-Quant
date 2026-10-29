@@ -420,6 +420,11 @@ def submit_order_intent(intent: OrderIntent, db: Session = Depends(get_db)):
         )
 
     result = execution_agent.process_order_intent(intent, snapshot=snapshot, db=db)
+    if result.status == "REJECTED":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=result.model_dump(mode="json"),
+        )
     return result.model_dump(mode="json")
 
 

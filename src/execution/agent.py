@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from src.config import settings
 from src.database.connection import SessionLocal
-from src.database.models import TradeModel
+from src.database.models import StrategyVersionModel, TradeModel
 from src.execution.base import BaseExecutionAdapter
 from src.execution.mt5_adapter import MT5ExecutionAdapter
 from src.execution.paper_adapter import PaperAdapter
@@ -45,6 +45,25 @@ class ExecutionAgent:
         if self.adapter.is_connected:
             self.risk.update_broker_heartbeat()
 
+    def get_active_champion(self, strategy_id: str, db: Optional[Session] = None) -> Optional[str]:
+        """Fetches the active CHAMPION version_id for a given strategy."""
+        own_session = False
+        if db is None:
+            db = SessionLocal()
+            own_session = True
+        try:
+            champ = db.query(StrategyVersionModel).filter(
+                StrategyVersionModel.strategy_id == strategy_id,
+                StrategyVersionModel.status == "CHAMPION",
+            ).first()
+            return champ.version_id if champ else None
+        except Exception as e:
+            logger.warning(f"Error retrieving active champion for strategy '{strategy_id}': {e}")
+            return None
+        finally:
+            if own_session:
+                db.close()
+
     def process_order_intent(
         self,
         intent: OrderIntent,
@@ -56,6 +75,12 @@ class ExecutionAgent:
         Executes order strictly gated by RiskEngine.
         If RiskEngine rejects, NEVER passes order to broker.
         """
+        # Wire active champion version if not explicitly set
+        if not intent.version_id or intent.version_id in ("v1.0.0", "default", "CHAMPION"):
+            active_champ = self.get_active_champion(intent.strategy_id, db=db)
+            if active_champ:
+                intent.version_id = active_champ
+
         # 0. Direct connectivity gate
         if not self.adapter.is_connected:
             logger.warning(f"ExecutionAgent: Broker adapter disconnected. OrderIntent {intent.intent_id} blocked.")
