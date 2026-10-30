@@ -171,6 +171,73 @@ class ExecutionAgent:
             if own_session:
                 db.close()
 
+    def close_position(
+        self,
+        ticket: int,
+        exit_price: float,
+        exit_time: Optional[datetime] = None,
+        exit_reason: str = "MANUAL",
+        db: Optional[Session] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Manually closes an open position on the adapter and persists realized PnL in TradeModel.
+        """
+        closed_data = self.adapter.close_position(
+            ticket=ticket,
+            exit_price=exit_price,
+            exit_time=exit_time,
+            exit_reason=exit_reason,
+        )
+        if not closed_data:
+            return None
+
+        self._sync_closed_trade_to_db(closed_data, db=db)
+        return closed_data
+
+    def tick_open_positions(
+        self,
+        snapshot: MarketSnapshot,
+        db: Optional[Session] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Feeds market snapshot into the execution adapter to evaluate SL/TP triggers.
+        Synchronizes any resulting trade closures to TradeModel.
+        """
+        closed_trades = self.adapter.tick_positions(snapshot)
+        for closed_data in closed_trades:
+            self._sync_closed_trade_to_db(closed_data, db=db)
+        return closed_trades
+
+    def _sync_closed_trade_to_db(
+        self,
+        closed_data: Dict[str, Any],
+        db: Optional[Session] = None,
+    ) -> None:
+        own_session = False
+        if db is None:
+            db = SessionLocal()
+            own_session = True
+        try:
+            trade = db.query(TradeModel).filter(TradeModel.broker_ticket == closed_data["ticket"]).first()
+            if trade:
+                trade.exit_time = closed_data["exit_time"]
+                trade.exit_price = closed_data["exit_price"]
+                trade.pnl_usd = closed_data["pnl_usd"]
+                trade.pnl_pips = closed_data.get("pnl_pips", 0.0)
+                trade.commission_usd = closed_data.get("commission_usd", trade.commission_usd)
+                trade.exit_reason = closed_data["exit_reason"]
+                db.commit()
+                logger.info(
+                    f"ExecutionAgent: Synced closed trade #{closed_data['ticket']} to DB | "
+                    f"PnL: ${closed_data['pnl_usd']:+.2f} | Reason: {closed_data['exit_reason']}"
+                )
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to sync closed trade #{closed_data['ticket']} to DB: {e}")
+        finally:
+            if own_session:
+                db.close()
+
     def emergency_flatten_and_kill(self, reason: str = "Admin Emergency Kill") -> int:
         """Triggered on emergency kill switch or severe risk limit breach."""
         self.risk.trigger_kill_switch(reason=reason)

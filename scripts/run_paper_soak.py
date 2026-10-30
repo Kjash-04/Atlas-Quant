@@ -60,6 +60,11 @@ def main():
         snap = adapter.ingest(payload)
         print(f"[{i+1}/{iterations}] Ingested Snapshot: {snap.symbol} @ {snap.close} (Regime: {snap.regime_label.value})")
 
+        # Tick open positions against market price bounds
+        closed_positions = execution_agent.tick_open_positions(snap)
+        for cp in closed_positions:
+            print(f"  -> Position #{cp['ticket']} Closed: PnL ${cp['pnl_usd']:+.2f} ({cp['pnl_pips']:+.1f} pips) via {cp['exit_reason']}")
+
         # Submit simulated order intent with side-aware brackets
         side = OrderSide.BUY if i % 2 == 0 else OrderSide.SELL
         if side == OrderSide.BUY:

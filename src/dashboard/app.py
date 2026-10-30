@@ -7,6 +7,7 @@ risk limits, and the strict $0 net spend LLM call budget.
 import streamlit as st
 import pandas as pd
 import numpy as np
+import altair as alt
 from datetime import datetime, timezone
 import json
 import hmac
@@ -133,34 +134,97 @@ try:
         equity = acct.get("equity", 100000.0)
         balance = acct.get("balance", 100000.0)
 
+        # 1. Real account equity and balance from simulator
         col1.metric("Account Equity", f"${equity:,.2f}", f"Balance: ${balance:,.2f}")
-        col2.metric("OOS Sharpe Target", "1.75", "+0.60 vs baseline")
-        col3.metric("Peak Drawdown", "4.2%", "Limit: 10.0%")
-        col4.metric("Active Positions", f"{acct.get('open_positions_count', 0)}", f"Max: {settings.RISK_MAX_OPEN_POSITIONS}")
 
-        st.subheader("Simulated Equity & Drawdown Curve")
-        # Generate representative multi-month curve
-        np.random.seed(101)
-        bars = 180
-        dates = pd.date_range("2026-05-01", periods=bars, freq="D")
-        drift = 0.0008
-        vol = 0.007
-        daily_rets = np.random.normal(drift, vol, bars)
-        equity_series = 100000.0 * np.cumprod(1 + daily_rets)
-        peak_series = np.maximum.accumulate(equity_series)
-        dd_series = (equity_series - peak_series) / peak_series * 100.0
+        # 2. Real Latest OOS Sharpe from most recent stored backtest
+        latest_bt = db.query(BacktestRunModel).order_by(BacktestRunModel.created_at.desc()).first()
+        if latest_bt and latest_bt.oos_metrics and latest_bt.oos_metrics.get("sharpe_ratio") is not None:
+            oos_sharpe = float(latest_bt.oos_metrics["sharpe_ratio"])
+            sharpe_display = f"{oos_sharpe:.2f}"
+            sharpe_delta = "from latest backtest"
+        else:
+            sharpe_display = "—"
+            sharpe_delta = "No backtest run yet"
+        col2.metric("Latest OOS Sharpe", sharpe_display, sharpe_delta)
 
-        chart_df = pd.DataFrame({
-            "Date": dates,
-            "Strategy Equity ($)": equity_series,
-            "Drawdown (%)": dd_series,
-        }).set_index("Date")
+        # 3. Peak Drawdown computed strictly from real closed trades
+        closed_trades = db.query(TradeModel).filter(TradeModel.exit_time.isnot(None)).order_by(TradeModel.exit_time.asc()).all()
+        if closed_trades:
+            eq_curve = [100000.0]
+            for t in closed_trades:
+                eq_curve.append(eq_curve[-1] + (t.pnl_usd or 0.0))
+            peaks = np.maximum.accumulate(eq_curve)
+            dds = (peaks - eq_curve) / peaks * 100.0
+            peak_dd = float(np.max(dds))
+            col3.metric("Peak Drawdown", f"{peak_dd:.2f}%", f"Limit: {settings.RISK_MAX_DRAWDOWN_PCT*100:.1f}%")
+        else:
+            col3.metric("Peak Drawdown", "0.00%", f"Limit: {settings.RISK_MAX_DRAWDOWN_PCT*100:.1f}%")
 
-        st.line_chart(chart_df["Strategy Equity ($)"], use_container_width=True)
-        st.line_chart(chart_df["Drawdown (%)"], use_container_width=True)
+        # 4. Active positions from paper adapter
+        open_pos_count = acct.get("open_positions_count", 0)
+        col4.metric("Active Positions", f"{open_pos_count}", f"Max: {settings.RISK_MAX_OPEN_POSITIONS}")
+
+        st.caption("Scorecard metrics: Equity & Positions from paper simulator | Sharpe from latest backtest | Drawdown from closed trades.")
+
+        st.subheader("Strategy Realized Equity & Drawdown Curve")
+        open_trades = db.query(TradeModel).filter(TradeModel.exit_time.is_(None)).all()
+
+        if not closed_trades:
+            if open_trades:
+                st.warning(f"⚠️ {len(open_trades)} position(s) are currently open in paper trading, but none have closed yet. Performance metrics require closed trades.")
+            st.info("No closed trades yet — there is nothing real to chart.")
+        else:
+            curve_points = []
+            running_equity = 100000.0
+            peak_equity = running_equity
+
+            # Baseline anchor point at first trade entry
+            start_time = closed_trades[0].entry_time or datetime.now(timezone.utc)
+            curve_points.append({
+                "Time": start_time,
+                "Strategy Equity ($)": running_equity,
+                "Drawdown (%)": 0.0,
+            })
+
+            for t in closed_trades:
+                running_equity += (t.pnl_usd or 0.0)
+                peak_equity = max(peak_equity, running_equity)
+                dd_pct = (peak_equity - running_equity) / peak_equity * 100.0 if peak_equity > 0 else 0.0
+                curve_points.append({
+                    "Time": t.exit_time or t.entry_time,
+                    "Strategy Equity ($)": round(running_equity, 2),
+                    "Drawdown (%)": round(dd_pct, 2),
+                })
+
+            df_curve = pd.DataFrame(curve_points)
+
+            chart_eq = (
+                alt.Chart(df_curve)
+                .mark_line(color="#238636", point=True)
+                .encode(
+                    x=alt.X("Time:T", title="Timeline (UTC)"),
+                    y=alt.Y("Strategy Equity ($):Q", title="Equity ($)", scale=alt.Scale(zero=False)),
+                    tooltip=["Time:T", "Strategy Equity ($):Q", "Drawdown (%):Q"],
+                )
+                .properties(height=280)
+            )
+            st.altair_chart(chart_eq, use_container_width=True)
+
+            chart_dd = (
+                alt.Chart(df_curve)
+                .mark_area(color="#da3633", opacity=0.35)
+                .encode(
+                    x=alt.X("Time:T", title="Timeline (UTC)"),
+                    y=alt.Y("Drawdown (%):Q", title="Drawdown (%)", scale=alt.Scale(zero=False)),
+                    tooltip=["Time:T", "Drawdown (%):Q"],
+                )
+                .properties(height=180)
+            )
+            st.altair_chart(chart_dd, use_container_width=True)
 
         st.subheader("Recent Executed Orders")
-        trades = db.query(TradeModel).order_by(TradeModel.entry_time.desc()).limit(10).all()
+        trades = db.query(TradeModel).order_by(TradeModel.entry_time.desc()).limit(15).all()
         if trades:
             trade_rows = [
                 {
@@ -170,8 +234,11 @@ try:
                     "Side": t.side,
                     "Lots": t.lots,
                     "Entry Price": t.entry_price,
-                    "PnL ($)": t.pnl_usd,
-                    "Time (UTC)": t.entry_time.strftime("%Y-%m-%d %H:%M"),
+                    "Exit Price": f"{t.exit_price:.5f}" if t.exit_price is not None else "—",
+                    "PnL ($)": f"${t.pnl_usd:+.2f}" if t.exit_time is not None else "—",
+                    "Status": f"CLOSED ({t.exit_reason})" if t.exit_time is not None else "OPEN",
+                    "Entry Time (UTC)": t.entry_time.strftime("%Y-%m-%d %H:%M") if t.entry_time else "—",
+                    "Exit Time (UTC)": t.exit_time.strftime("%Y-%m-%d %H:%M") if t.exit_time else "—",
                 }
                 for t in trades
             ]

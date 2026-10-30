@@ -44,3 +44,17 @@ class BaseExecutionAdapter(ABC):
     @abstractmethod
     def flatten_all_positions(self) -> int:
         pass
+
+    def close_position(
+        self,
+        ticket: int,
+        exit_price: float,
+        exit_time: Optional[Any] = None,
+        exit_reason: str = "MANUAL",
+    ) -> Optional[Dict[str, Any]]:
+        """Optional hook to close a specific position by ticket with realized PnL."""
+        return None
+
+    def tick_positions(self, snapshot: MarketSnapshot) -> List[Dict[str, Any]]:
+        """Optional hook to evaluate SL/TP triggers against market snapshots."""
+        return []
