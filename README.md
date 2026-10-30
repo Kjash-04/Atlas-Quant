@@ -16,7 +16,7 @@ The entire runtime operates under a **strict $0.00 net spend guarantee** utilizi
 ### The Continuous Self-Improvement Loop
 > Market ticks and calendar events are ingested and normalized into causal, timestamp-aligned `MarketSnapshot` streams. The `ResearchAgent` synthesizes snapshots and historical learnings into falsifiable hypotheses. The `StrategyCoderAgent` converts hypotheses into bounded, machine-readable `StrategySpec` objects and generates deterministic Python strategy code. The `BacktestAgent` evaluates candidates locally across In-Sample (60%), Out-of-Sample (20%), and walk-forward folds with full friction costs (spread, slippage, commission, swap). The `ReasoningCritic` diagnoses residual losses, proposes parameter diffs, and executes pre-registered keep-or-revert evaluations. Successful challengers are promoted to `CHAMPION` in paper execution, continuously monitored by telemetry agents that feed real trade residuals back into the research engine.
 
-### Mermaid Architecture Diagram
+### Architecture Diagram
 
 ```mermaid
 flowchart TD
@@ -50,14 +50,14 @@ flowchart TD
     end
 
     subgraph Risk_Layer["Deterministic Risk Gatekeeper (Immutable by AI)"]
-        RiskEngine["RiskEngine<br/>• 3% Daily Loss (PAUSED)<br/>• 10% Drawdown (HALTED)<br/>• Sizing (1% Fixed Fractional)<br/>• News Blackout & Spread Gate<br/>• Kill Switch & Idempotency"]
+        RiskEngine["RiskEngine<br/>• 3% Daily Loss (PAUSED)<br/>• 10% Drawdown (HALTED)<br/>• Sizing (1% Fixed Fractional)<br/>• News Blackout & Spread Gate<br/>• Kill Switch & Atomic Idempotency<br/>• Rate Limiter (10 req/min)"]
     end
 
     subgraph Execution_Layer["Execution & Brokerage"]
         ExecAgent["ExecutionAgent"]
         PaperBroker["PaperAdapter<br/>(Simulated Fills & Soak)"]
         MT5_Terminal["MT5 Windows Terminal<br/>(Demo/Paper Account)"]
-        LiveGate{{"Human Approval Gate<br/>(Signed Token Required)"}}
+        LiveGate{{"Human Approval Gate<br/>(Signed HMAC Token Required)"}}
     end
 
     subgraph Telemetry_Layer["Monitoring, Audit & Dashboard"]
@@ -67,151 +67,60 @@ flowchart TD
         Dashboard["Streamlit UI & FastAPI Control Plane"]
     end
 
-    %% Data Connections
-    Data_Sources --> DIA
-    DIA --> Indicators
-    Indicators --> MarketSnapshotStream[("MarketSnapshots Event Stream")]
-    MarketSnapshotStream --> Regime
-    MarketSnapshotStream --> Research
-
-    %% LangGraph Flow
-    Regime --> Research
-    Research --> Coder
-    Coder --> Backtester
-    Backtester --> WFA
-    WFA --> Robustness
-    Robustness --> Critic_Observe
-    Critic_Observe --> Critic_Diag
-    Critic_Diag --> Critic_Hyp
-    Critic_Hyp --> Coder
-    Robustness --> Critic_Decision
-    Critic_Decision --> Memory
-    Memory --> Research
-
-    %% Execution Path (LLM NEVER BYPASSES RISK ENGINE)
-    Memory -. Champion Spec .-> ExecAgent
-    ExecAgent --> RiskEngine
-    RiskEngine -- "REJECT (Unsafe)" --> Alerts
-    RiskEngine -- "APPROVE (Passed All 10 Gates)" --> PaperBroker
-    RiskEngine -. "Live Path Only" .-> LiveGate
-    LiveGate -. "Signed Signature" .-> MT5_Terminal
-
-    %% Feedback & Telemetry
-    PaperBroker --> Monitor
-    MT5_Terminal --> Monitor
-    Monitor --> Alerts
-    Monitor --> Dashboard
-    BudgetGuard --> Critic_Diag
-    BudgetGuard --> Critic_Hyp
-    Monitor --> Memory
+    Data_Sources --> Ingestion_Layer
+    Ingestion_Layer --> Research_Orchestrator
+    Research_Orchestrator --> Validation_Layer
+    Validation_Layer --> Memory
+    Research_Orchestrator --> Risk_Layer
+    Risk_Layer --> Execution_Layer
+    Execution_Layer --> Telemetry_Layer
+    Telemetry_Layer --> Critic_Observe
 ```
 
 ---
 
-## 2. Repository File Tree
+## 2. Project Directory Tree
 
-```
-atlas-quant/
-├── .env.example                     # Environment template with dual Gemini keys & risk limits
-├── .env                             # Local developer configuration
-├── Dockerfile                       # Container deployment definition
-├── docker-compose.yml               # FastAPI, Dashboard & Redis services
-├── pytest.ini                       # Test suite configuration
-├── requirements.txt                 # Pinned dependencies (Python 3.11+ 64-bit)
-├── setup_windows.ps1                # PowerShell automated installation script
-├── README.md                        # Architectural specification and operations guide
-├── RUNBOOK.md                       # Incident response, backup & go-live procedures
+```text
+Atlas-Quant/
+├── .env.example                     # Production environment variable templates
 ├── configs/
-│   ├── config.yaml                  # System parameters, walk-forward & cost defaults
-│   └── risk_params.yaml             # Immutable pre-trade risk engine limits
+│   ├── config.yaml                  # System-wide parameters & symbols
+│   └── risk_params.yaml             # Risk engine hard boundaries
 ├── data/
-│   ├── sample_bars.csv              # High-density EURUSD M15 historical bars
-│   └── news_calendar.json           # High-impact economic news calendar events
-├── src/
-│   ├── __init__.py
-│   ├── config.py                    # Zero-dependency settings loader
-│   ├── api/
-│   │   ├── __init__.py
-│   │   └── main.py                  # FastAPI REST control plane & admin safety endpoints
-│   ├── backtest/
-│   │   ├── __init__.py
-│   │   ├── costs.py                 # Real-world friction model (spread, slippage, commission, swap)
-│   │   ├── engine.py                # Chronological backtest engine (IS/OOS/Test & champion scorecard)
-│   │   ├── metrics.py               # Annualized Sharpe, Sortino, Calmar, Expectancy math
-│   │   ├── report.py                # Markdown & JSON report formatting
-│   │   ├── robustness.py            # 2D parameter sweep & curve-fitting island detection
-│   │   └── walk_forward.py          # Rolling 4-fold walk-forward validation
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── audit.py                 # Cryptographic hash and lifecycle database logger
-│   │   ├── event_bus.py             # In-memory and asynchronous event dispatcher
-│   │   ├── llm_budget.py            # Hard 20 calls/day cap & $0 net spend guard
-│   │   └── llm_router.py            # Dual-key Gemini 3.8 Flash & 4 Argon router with disk cache
-│   ├── dashboard/
-│   │   ├── __init__.py
-│   │   └── app.py                   # Streamlit multi-tab production dashboard
-│   ├── database/
-│   │   ├── __init__.py
-│   │   ├── connection.py            # SQLAlchemy engine, session maker & init_db()
-│   │   └── models.py                # 10 relational tables for complete auditability
-│   ├── execution/
-│   │   ├── __init__.py
-│   │   ├── agent.py                 # ExecutionAgent gating orders via RiskEngine
-│   │   ├── base.py                  # BaseExecutionAdapter interface
-│   │   ├── mt5_adapter.py           # MetaTrader 5 Windows-native 64-bit adapter
-│   │   └── paper_adapter.py         # Simulated execution adapter for soak testing
-│   ├── ingestion/
-│   │   ├── __init__.py
-│   │   ├── adapters.py              # TradingView, MT5, News & Alt-Data ingestion
-│   │   ├── agent.py                 # DataIngestionAgent coordinating data cleaning
-│   │   └── indicators.py            # 100% causal indicators (EMA, RSI, ATR, Regimes, Sessions)
-│   ├── monitoring/
-│   │   ├── __init__.py
-│   │   ├── alerts.py                # Telegram, Slack and Console alert dispatcher
-│   │   └── health.py                # Telemetry monitoring broker ping, DB, disk & budget
-│   ├── research/
-│   │   ├── __init__.py
-│   │   ├── agent.py                 # ResearchAgent formulating falsifiable hypotheses
-│   │   └── prompt_templates.py      # System prompts enforcing structured outputs
-│   ├── risk_engine/
-│   │   ├── __init__.py
-│   │   ├── engine.py                # RiskEngine evaluating 10 pre-trade safety barriers
-│   │   ├── rules.py                 # RiskRuleViolation enums and gate check results
-│   │   └── sizing.py                # Fixed fractional 1% equity position sizing
-│   ├── schemas/
-│   │   ├── __init__.py
-│   │   ├── backtest.py              # BacktestRunResult, metrics & fold schemas
-│   │   ├── hypothesis.py            # Hypothesis & 9-stage status funnel schema
-│   │   ├── market.py                # MarketSnapshot, IndicatorSet & RegimeLabel schemas
-│   │   ├── strategy.py              # StrategySpec, Rule, Sizing & Control schemas
-│   │   ├── system.py                # LLMCallRecord, Health & HumanApproval schemas
-│   │   └── trade.py                 # OrderIntent, ExecutionResult & TradeRecord schemas
-│   ├── self_improvement/
-│   │   ├── __init__.py
-│   │   ├── critic.py                # ReasoningCritic handling Observe, Diagnose, Hypothesize
-│   │   ├── memory.py                # MemoryAgent managing Champion registry & learnings
-│   │   ├── orchestrator.py          # LangGraph 7-step autonomous state machine
-│   │   └── states.py                # SelfImprovementState TypedDict
-│   └── strategies/
-│       ├── __init__.py
-│       ├── base.py                  # BaseStrategy abstract class
-│       ├── coder_agent.py           # StrategyCoderAgent converting hypotheses to code
-│       ├── validator.py             # StrategyValidator checking bounds & risk controls
-│       └── generated/
-│           ├── __init__.py
-│           └── ema_rsi_trend.py     # Production reference strategy implementation
+│   ├── atlas_quant.db               # SQLite production database
+│   ├── llm_budget_state.json        # Persistent daily LLM spend tracker
+│   ├── news_calendar.json           # Cached economic news calendar
+│   └── sample_bars.csv              # Synthetic EURUSD M15 historical bars
 ├── scripts/
 │   ├── generate_sample_data.py      # Generates EURUSD historical bars & news calendar
+│   ├── gen_secrets.py               # Generates cryptographically secure admin secrets
 │   ├── run_backtest.py              # Runs backtest, walk-forward & robustness sweep
 │   ├── run_paper_soak.py            # Executes live paper trading soak loop
 │   └── run_self_improvement.py      # Executes complete LangGraph self-improvement cycle
-└── tests/
-    ├── __init__.py
-    ├── conftest.py                  # Pytest fixtures, mock DB & sample data
-    ├── test_api_endpoints.py        # Tests FastAPI routes & admin endpoints
+├── src/
+│   ├── api/                         # FastAPI control plane, REST routes & admin security
+│   ├── backtest/                    # Walk-forward analysis, reporting, robustness
+│   ├── core/                        # Dual-key LLM router, budget guard & rate limiter
+│   ├── dashboard/                   # Interactive Streamlit operations dashboard
+│   ├── database/                    # SQLAlchemy connection & relational models
+│   ├── execution/                   # MetaTrader 5 native & paper broker adapters
+│   ├── ingestion/                   # Causal indicators, TradingView webhook adapter
+│   ├── monitoring/                  # Health telemetry, alert dispatchers
+│   ├── research/                    # ResearchAgent & StrategyCoderAgent
+│   ├── risk_engine/                 # 10 deterministic pre-trade risk barriers
+│   ├── schemas/                     # Strict Pydantic models for markets & trades
+│   ├── self_improvement/            # 7-step LangGraph orchestrator & state machine
+│   └── strategies/                  # Dynamic rule engine & strategy implementations
+└── tests/                           # 70 automated pytest unit & regression tests
+    ├── conftest.py                  # Isolated per-session SQLite test databases
+    ├── test_api_endpoints.py        # Tests FastAPI endpoints & REST responses
+    ├── test_api_security.py         # Tests fail-closed auth, HMAC live approvals & secrets
+    ├── test_audit_fixes.py          # Regression tests for dynamic rules & truthful metrics
     ├── test_backtest_and_leakage.py # Tests chronological splits & friction costs
     ├── test_execution_adapters.py   # Tests ExecutionAgent and PaperAdapter
-    ├── test_indicators_and_causality.py # Proves future bar corruption leaves past indicators identical
+    ├── test_final_fixes.py          # Tests durable idempotency, rate limiting, causal ATR
+    ├── test_indicators_and_causality.py # Proves future bars leave past indicators unchanged
     ├── test_llm_router_and_budget.py # Proves 20 calls/day cap and $0 spend enforcement
     ├── test_risk_engine.py          # Proves all 10 RiskEngine rejection barriers
     ├── test_self_improvement_loop.py # Tests LangGraph 7-step cycle end-to-end
@@ -225,20 +134,21 @@ atlas-quant/
 Atlas-Quant runs natively on Windows 10/11 x64. Because MetaTrader 5 is a native Windows application, no Wine or Linux emulation layer is required.
 
 ### Step 1: Run Automated Setup Script
-In PowerShell (as administrator if installing system tools):
+In PowerShell:
 ```powershell
 .\setup_windows.ps1
 ```
 The script automatically:
 1. Verifies 64-bit Python (`AMD64`).
-2. Copies `.env.example` to `.env`.
-3. Installs all required packages via `pip`.
-4. Initializes the SQLite relational database schema.
-5. Generates initial market sample bars and news calendar data.
-6. Runs the entire 32-test validation suite to guarantee mathematical integrity.
+2. Copies `.env.example` to `.env` if not present.
+3. Generates cryptographically secure admin secrets via `scripts/gen_secrets.py`.
+4. Installs all required packages via `pip`.
+5. Initializes the SQLite relational database schema.
+6. Generates initial market sample bars and news calendar data.
+7. Runs the test suite to guarantee mathematical integrity.
 
 ### Step 2: Configure Secrets in `.env`
-Open `.env` and set your API keys:
+Open `.env` and verify your API keys:
 ```ini
 # Project A: Free tier (no billing enabled)
 GEMINI_FREE_API_KEY="AIzaSyYourFreeKeyProjectA"
@@ -248,18 +158,34 @@ GEMINI_DEEP_API_KEY="AIzaSyYourDeepKeyProjectB"
 ```
 *(Note: If API keys are not supplied, the built-in deterministic offline fallback seamlessly activates, allowing all research and self-improvement loops to execute locally for testing).*
 
-### Step 3: Launch Services
-In Terminal 1 (FastAPI Control Plane):
+### Step 3: Run Validation & Scripts
 ```powershell
-uvicorn src.api.main:app --reload --port 8000
-```
-Interactive API documentation: `http://localhost:8000/docs`
+# Run the complete test suite (70 tests)
+python -m pytest tests -q
 
-In Terminal 2 (Interactive Streamlit Dashboard):
+# Run chronological backtest, walk-forward analysis & parameter robustness sweep
+python scripts/run_backtest.py
+
+# Run paper soak harness with side-aware brackets
+python scripts/run_paper_soak.py
+
+# Run autonomous 7-step self-improvement cycle
+python scripts/run_self_improvement.py
+```
+
+### Step 4: Launch Live Services
+**Terminal 1 — FastAPI Control Plane:**
+```powershell
+uvicorn src.api.main:app --host 127.0.0.1 --port 8000
+```
+- Interactive OpenAPI Docs: `http://127.0.0.1:8000/docs`
+- Health Telemetry: `http://127.0.0.1:8000/health`
+
+**Terminal 2 — Interactive Streamlit Dashboard:**
 ```powershell
 streamlit run src/dashboard/app.py
 ```
-Dashboard URL: `http://localhost:8501`
+- Dashboard URL: `http://localhost:8501`
 
 ---
 
@@ -273,7 +199,7 @@ Dashboard URL: `http://localhost:8501`
 ### Hard Budget Guard (`src/core/llm_budget.py`)
 - Tracks daily deep model calls in `data/llm_budget_state.json`.
 - When daily call count reaches **20**, further deep calls raise `BudgetExhaustedError`.
-- The self-improvement loop intercepts this error, logs `BUDGET_EXHAUSTED`, and skips paid calls without failing the system.
+- The self-improvement loop intercepts this error, logs `BUDGET_EXHAUSTED`, and falls back safely to deterministic reasoning without failing the system.
 - Disk caching (`src/core/llm_router.py`) keys responses by `sha256(model:prompt)` to avoid duplicate calls.
 
 ---
@@ -290,8 +216,11 @@ The LLM is **never** permitted to send orders directly to MetaTrader 5. All trad
 6. **Market Quality**: Rejects if spread > 2.5 pips or high-impact news event is within 30 minutes.
 7. **Session Gate**: Restricts execution to allowed liquid forex sessions (`LONDON`, `NEW_YORK`, `OVERLAP_LDN_NY`).
 8. **Margin Buffer**: Requires free margin >= 5% equity buffer.
-9. **Position Sizing**: Dynamically sizes position using Fixed Fractional Risk (**exactly 1.0% equity** based on stop distance in ATR), quantized to broker lot step.
-10. **Idempotency Gate**: Rejects duplicate intent keys to eliminate double-fills.
+9. **Position Sizing & Lot Bounds**: Dynamically sizes position using Fixed Fractional Risk (**exactly 1.0% equity** based on stop distance in ATR), quantized to broker lot step.
+10. **Idempotency Gate & Live Approval**: 
+    - Database-backed `idempotency_keys` table with primary key atomic claim and 24-hour TTL (orders rejected at pre-trade barriers are released).
+    - Requires signed HMAC human approval record (`POST /admin/approve-live`) before any live order reaches a broker.
+11. **API Rate Limiting**: In-process sliding-window limiter on `POST /orders` (10 orders / 60 s per API key) returning HTTP 429 with `Retry-After`.
 
 ---
 
@@ -315,5 +244,3 @@ The LLM is **never** permitted to send orders directly to MetaTrader 5. All trad
 
 ---
 *Atlas-Quant — Built with Google Gemini 4 Argon & Gemini 3.8 Flash.*
-#   A t l a s - Q u a n t  
- 
