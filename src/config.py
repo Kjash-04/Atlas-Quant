@@ -101,6 +101,10 @@ class Settings:
         self.ADMIN_RESET_TOKEN: str = (os.getenv("ADMIN_RESET_TOKEN") or "").strip()
         self.ADMIN_HMAC_SECRET: str = (os.getenv("ADMIN_HMAC_SECRET") or "").strip()
 
+        # Order Rate Limiting (per API key)
+        self.ORDER_RATE_LIMIT_MAX: int = _get_int("ORDER_RATE_LIMIT_MAX", 10)
+        self.ORDER_RATE_LIMIT_WINDOW_SEC: int = _get_int("ORDER_RATE_LIMIT_WINDOW_SEC", 60)
+
         # Alerts
         self.ALERT_TELEGRAM_BOT_TOKEN: str = os.getenv("ALERT_TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.ALERT_TELEGRAM_CHAT_ID: str = os.getenv("ALERT_TELEGRAM_CHAT_ID", "")

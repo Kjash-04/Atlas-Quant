@@ -196,3 +196,14 @@ class ApprovalModel(Base):
     notes = Column(Text, nullable=False)
     approved_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     is_revoked = Column(Boolean, default=False)
+
+
+class IdempotencyKeyModel(Base):
+    __tablename__ = "idempotency_keys"
+
+    idempotency_key = Column(String(128), primary_key=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    strategy_id = Column(String(64), nullable=True)
+    symbol = Column(String(20), nullable=True)
+

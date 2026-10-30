@@ -41,6 +41,7 @@ class SelfImprovementState(TypedDict, total=False):
     learning_id: Optional[str]
 
     # Execution control & guardrails
+    insufficient_data: bool
     is_budget_exhausted: bool
     consecutive_reverts: int
     error: Optional[str]

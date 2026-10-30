@@ -7,13 +7,14 @@ Immutable by the AI self-improvement loop.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.config import settings
 from src.database.connection import SessionLocal
-from src.database.models import ApprovalModel, SystemHealthModel
+from src.database.models import ApprovalModel, IdempotencyKeyModel, SystemHealthModel
 from src.risk_engine.rules import RiskGateCheckResult, RiskRuleViolation
 from src.risk_engine.sizing import calculate_risk_sized_lots
 from src.schemas.market import MarketSnapshot
@@ -258,20 +259,27 @@ class RiskEngine:
                 reason=f"Approved lot size {approved_lots} is below minimum allowed.",
             )
 
-        # 9. Idempotency Check
-        if intent.idempotency_key in self._processed_idempotency_keys:
+        # 9. Idempotency Check (Persistent with Atomic Claim & 24h TTL)
+        claim_ok, claim_err = self.claim_idempotency_key(
+            key=intent.idempotency_key,
+            strategy_id=intent.strategy_id,
+            symbol=intent.symbol,
+            ttl_sec=86400,
+            db=db,
+        )
+        if not claim_ok:
             return RiskGateCheckResult(
                 approved=False,
                 violation=RiskRuleViolation.DUPLICATE_IDEMPOTENCY_KEY,
-                reason=f"Duplicate idempotency key '{intent.idempotency_key}' detected.",
+                reason=claim_err or f"Duplicate idempotency key '{intent.idempotency_key}' detected.",
             )
-        self._processed_idempotency_keys.add(intent.idempotency_key)
 
         # 10. Live Trading Authorization Gate
         if not settings.PAPER_TRADING and settings.LIVE_TRADING:
             # Must verify signed human approval record exists in DB
             has_approval = self._verify_live_approval(db)
             if not has_approval:
+                self.release_idempotency_key(intent.idempotency_key, db=db)
                 return RiskGateCheckResult(
                     approved=False,
                     violation=RiskRuleViolation.UNAUTHORIZED_LIVE_ORDER,
@@ -285,6 +293,97 @@ class RiskEngine:
             reason="All 10 risk barriers PASSED.",
             approved_lots=approved_lots,
         )
+
+    def claim_idempotency_key(
+        self,
+        key: str,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        ttl_sec: int = 86400,
+        db: Optional[Session] = None,
+    ) -> Tuple[bool, str]:
+        """
+        Atomically claims an idempotency key with a 24-hour TTL in the database.
+        Returns: (success: bool, error_message: str)
+        If the key exists and has not expired, claim fails (duplicate).
+        If the key exists but is expired, it is renewed.
+        """
+        now = datetime.now(timezone.utc)
+        expires_at = now + timedelta(seconds=ttl_sec)
+
+        own_session = False
+        if db is None:
+            db = SessionLocal()
+            own_session = True
+        try:
+            existing = db.query(IdempotencyKeyModel).filter(
+                IdempotencyKeyModel.idempotency_key == key
+            ).first()
+
+            if existing is not None:
+                exp = existing.expires_at
+                if exp is not None and exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if exp is not None and now < exp:
+                    self._processed_idempotency_keys.add(key)
+                    return False, f"Duplicate idempotency key '{key}' detected."
+                else:
+                    # Expired key: renew
+                    existing.created_at = now
+                    existing.expires_at = expires_at
+                    existing.strategy_id = strategy_id
+                    existing.symbol = symbol
+                    db.commit()
+                    self._processed_idempotency_keys.add(key)
+                    return True, ""
+
+            new_record = IdempotencyKeyModel(
+                idempotency_key=key,
+                created_at=now,
+                expires_at=expires_at,
+                strategy_id=strategy_id,
+                symbol=symbol,
+            )
+            db.add(new_record)
+            db.commit()
+            self._processed_idempotency_keys.add(key)
+            return True, ""
+        except IntegrityError:
+            db.rollback()
+            self._processed_idempotency_keys.add(key)
+            return False, f"Duplicate idempotency key '{key}' detected."
+        except Exception as e:
+            logger.warning(f"Database idempotency check error ({e}), falling back to in-memory check.")
+            if key in self._processed_idempotency_keys:
+                return False, f"Duplicate idempotency key '{key}' detected."
+            self._processed_idempotency_keys.add(key)
+            return True, ""
+        finally:
+            if own_session:
+                db.close()
+
+    def release_idempotency_key(self, key: str, db: Optional[Session] = None) -> bool:
+        """
+        Releases an idempotency key so an order rejected at barrier 10 can still be retried.
+        """
+        self._processed_idempotency_keys.discard(key)
+        own_session = False
+        if db is None:
+            db = SessionLocal()
+            own_session = True
+        try:
+            db.query(IdempotencyKeyModel).filter(
+                IdempotencyKeyModel.idempotency_key == key
+            ).delete()
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            logger.warning(f"Failed to release idempotency key {key}: {e}")
+            return False
+        finally:
+            if own_session:
+                db.close()
 
     def _verify_live_approval(self, db: Optional[Session] = None) -> bool:
         own_session = False

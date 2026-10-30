@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import uuid
@@ -29,6 +30,7 @@ from src.core.audit import audit_logger
 from src.core.llm_budget import budget_guard, BudgetExhaustedError
 from src.database.connection import SessionLocal
 from src.database.models import StrategyVersionModel, TradeModel, MarketSnapshotModel, BacktestRunModel
+from src.ingestion.indicators import detect_session
 from src.schemas.hypothesis import Hypothesis, HypothesisStatus
 from src.schemas.strategy import StrategySpec
 from src.self_improvement.critic import ReasoningCritic
@@ -57,9 +59,9 @@ class SelfImprovementOrchestrator:
     # --- Node 1: Observe (Gemini 3.8 Flash Free) ---
     def observe_node(self, state: SelfImprovementState) -> Dict[str, Any]:
         logger.info(f"[{state.get('cycle_id')}] Step 1: Observe residuals...")
-        strategy_id = state.get("strategy_id", "strat_default")
+        strategy_id = state.get("strategy_id", "strat_ema_rsi_trend")
 
-        # Query real historical trades and latest market snapshot
+        # Query real historical trades and causal market snapshot
         trade_logs = []
         market_context = {"active_regime": "RANGING_HIGH_VOL", "recent_vol": "ELEVATED"}
         db = self.db or SessionLocal()
@@ -74,6 +76,24 @@ class SelfImprovementOrchestrator:
             )
             for t in trades:
                 pnl = t.pnl_usd if t.pnl_usd is not None else 0.0
+                entry_dt = t.entry_time
+                if entry_dt is not None and entry_dt.tzinfo is None:
+                    entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+
+                # Causal ATR lookup: snapshot at or before trade entry time (no look-ahead)
+                snap_causal = (
+                    db.query(MarketSnapshotModel)
+                    .filter(
+                        MarketSnapshotModel.symbol == t.symbol,
+                        MarketSnapshotModel.timestamp_utc <= entry_dt,
+                    )
+                    .order_by(MarketSnapshotModel.timestamp_utc.desc())
+                    .first()
+                )
+                atr_pct = 50.0
+                if snap_causal and snap_causal.indicators_json:
+                    atr_pct = float(snap_causal.indicators_json.get("atr_percentile_100", 50.0))
+
                 trade_logs.append({
                     "trade_id": t.trade_id,
                     "symbol": t.symbol,
@@ -82,8 +102,8 @@ class SelfImprovementOrchestrator:
                     "entry_price": t.entry_price,
                     "exit_price": t.exit_price,
                     "lots": t.lots,
-                    "session": "LONDON_NY",
-                    "atr_pct": 50.0,
+                    "session": detect_session(entry_dt) if entry_dt else "UNKNOWN",
+                    "atr_pct": atr_pct,
                 })
 
             snap = (
@@ -105,16 +125,24 @@ class SelfImprovementOrchestrator:
             if own_session:
                 db.close()
 
-        # Baseline fallback if no trades recorded yet
+        # Zero history check: honest "insufficient data" and halt cycle before spending Argon calls
         if not trade_logs:
-            trade_logs = [{"trade": 1, "pnl": -45.0, "atr_pct": 89.2, "session": "OVERLAP_LDN_NY"}]
+            event_msg = f"Observe: insufficient trade history for '{strategy_id}' (0 closed trades). No fabricated data used."
+            logger.info(f"[{state.get('cycle_id')}] {event_msg}")
+            return {
+                "insufficient_data": True,
+                "observed_residuals": {},
+                "audit_events": state.get("audit_events", []) + [event_msg],
+            }
 
         residuals = self.critic.observe_residuals(
             strategy_id=strategy_id,
             trade_logs=trade_logs,
             market_context=market_context,
+            db=self.db,
         )
         return {
+            "insufficient_data": False,
             "observed_residuals": residuals,
             "audit_events": state.get("audit_events", []) + [f"Observe: loss concentration in {residuals.get('affected_regime')}"],
         }
@@ -122,6 +150,10 @@ class SelfImprovementOrchestrator:
     # --- Node 2: Diagnose (Gemini 4 Argon Deep) ---
     def diagnose_node(self, state: SelfImprovementState) -> Dict[str, Any]:
         logger.info(f"[{state.get('cycle_id')}] Step 2: Diagnose failure...")
+        if state.get("insufficient_data"):
+            return {
+                "audit_events": state.get("audit_events", []) + ["Diagnose: skipped (insufficient trade history)"],
+            }
         if not budget_guard.can_call_deep():
             logger.warning("Deep LLM budget exhausted. Halting self-improvement cycle.")
             return {
@@ -132,7 +164,8 @@ class SelfImprovementOrchestrator:
         try:
             diag = self.critic.diagnose_failure(
                 observation=state.get("observed_residuals", {}),
-                champion_metrics=state.get("champion_metrics", {"sharpe_ratio": 1.10, "max_drawdown_pct": 11.5}),
+                champion_metrics=state.get("champion_metrics", {"sharpe_ratio": 0.0, "max_drawdown_pct": 0.0}),
+                db=self.db,
             )
             return {
                 "diagnosis": diag,
@@ -144,12 +177,17 @@ class SelfImprovementOrchestrator:
     # --- Node 3: Hypothesize (Gemini 4 Argon Deep) ---
     def hypothesize_node(self, state: SelfImprovementState) -> Dict[str, Any]:
         logger.info(f"[{state.get('cycle_id')}] Step 3: Hypothesize fix...")
+        if state.get("insufficient_data"):
+            return {
+                "audit_events": state.get("audit_events", []) + ["Hypothesize / Experiment / Validate: skipped"],
+            }
         if state.get("is_budget_exhausted"):
             return {}
 
         hyp_diff = self.critic.hypothesize_fix(
             diagnosis=state.get("diagnosis", {}),
             current_spec={"stop_loss_atr_mult": 1.5, "atr_percentile_max": 90.0},
+            db=self.db,
         )
         return {
             "hypothesis_diff": hyp_diff,
@@ -159,7 +197,7 @@ class SelfImprovementOrchestrator:
     # --- Node 4: Experiment (StrategyCoderAgent) ---
     def experiment_node(self, state: SelfImprovementState) -> Dict[str, Any]:
         logger.info(f"[{state.get('cycle_id')}] Step 4: Experiment (Coder Agent)...")
-        if state.get("is_budget_exhausted"):
+        if state.get("insufficient_data") or state.get("is_budget_exhausted"):
             return {}
 
         strategy_id = state.get("strategy_id", "strat_default")
@@ -197,7 +235,7 @@ class SelfImprovementOrchestrator:
     # --- Node 5: Validate (Local compute BacktestAgent) ---
     def validate_node(self, state: SelfImprovementState) -> Dict[str, Any]:
         logger.info(f"[{state.get('cycle_id')}] Step 5: Validate (Local Backtest)...")
-        if state.get("is_budget_exhausted") or state.get("error"):
+        if state.get("insufficient_data") or state.get("is_budget_exhausted") or state.get("error"):
             return {}
 
         # Default sample dataframe if not set
@@ -242,9 +280,9 @@ class SelfImprovementOrchestrator:
                     )
                     if bt_run and bt_run.oos_metrics:
                         champ_metrics = {
-                            "sharpe_ratio": float(bt_run.oos_metrics.get("sharpe_ratio", 1.15)),
-                            "max_drawdown_pct": float(bt_run.oos_metrics.get("max_drawdown_pct", 11.8)),
-                            "expectancy_usd": float(bt_run.oos_metrics.get("expectancy_usd", 40.0)),
+                            "sharpe_ratio": float(bt_run.oos_metrics.get("sharpe_ratio", 0.0)),
+                            "max_drawdown_pct": float(bt_run.oos_metrics.get("max_drawdown_pct", 0.0)),
+                            "expectancy_usd": float(bt_run.oos_metrics.get("expectancy_usd", 0.0)),
                         }
                 except Exception as e:
                     logger.warning(f"Failed fetching champion backtest from DB: {e}")
@@ -253,9 +291,9 @@ class SelfImprovementOrchestrator:
                         db_session.close()
             if not champ_metrics:
                 champ_metrics = {
-                    "sharpe_ratio": 1.15,
-                    "max_drawdown_pct": 11.8,
-                    "expectancy_usd": 40.0,
+                    "sharpe_ratio": 0.0,
+                    "max_drawdown_pct": 0.0,
+                    "expectancy_usd": 0.0,
                 }
 
         def _pick_metric(val: Any, default: float = 0.0) -> float:
@@ -277,6 +315,13 @@ class SelfImprovementOrchestrator:
     # --- Node 6: Keep or Revert ---
     def keep_or_revert_node(self, state: SelfImprovementState) -> Dict[str, Any]:
         logger.info(f"[{state.get('cycle_id')}] Step 6: Keep or Revert decision...")
+        if state.get("insufficient_data"):
+            return {
+                "decision": "REVERT",
+                "reason": "Insufficient trade history to justify a strategy change.",
+                "consecutive_reverts": state.get("consecutive_reverts", 0),
+                "audit_events": state.get("audit_events", []) + ["KeepOrRevert: Decision=REVERT"],
+            }
         if state.get("is_budget_exhausted") or state.get("error"):
             return {"decision": "REVERT", "reason": state.get("error", "Budget exhausted or synthesis failed")}
 
@@ -294,6 +339,7 @@ class SelfImprovementOrchestrator:
         decision, reason = self.critic.evaluate_keep_or_revert(
             champion_metrics=state.get("champion_metrics", {}),
             challenger_metrics=state.get("challenger_metrics", {}),
+            db=self.db,
         )
 
         consec = state.get("consecutive_reverts", 0)
@@ -312,12 +358,29 @@ class SelfImprovementOrchestrator:
     # --- Node 7: Store (MemoryAgent / Free Flash) ---
     def store_node(self, state: SelfImprovementState) -> Dict[str, Any]:
         logger.info(f"[{state.get('cycle_id')}] Step 7: Store learning & registry update...")
-        strategy_id = state.get("strategy_id", "strat_default")
+        strategy_id = state.get("strategy_id", "strat_ema_rsi_trend")
         decision = state.get("decision", "REVERT")
+
+        if state.get("insufficient_data"):
+            learning_id = self.memory.store_learning(
+                strategy_id=strategy_id,
+                diagnosis="Insufficient trade history.",
+                hypothesis="N/A",
+                diff="{}",
+                metrics_before=state.get("champion_metrics", {}),
+                metrics_after=state.get("challenger_metrics", {}),
+                decision="REVERT",
+                reason=state.get("reason", "Insufficient trade history to justify a strategy change."),
+                db=self.db,
+            )
+            return {
+                "learning_id": learning_id,
+                "audit_events": state.get("audit_events", []) + ["Store: Persisted learning"],
+            }
 
         # If KEEP, promote to champion
         if decision == "KEEP" and state.get("challenger_version_id"):
-            self.memory.promote_to_champion(strategy_id, state["challenger_version_id"])
+            self.memory.promote_to_champion(strategy_id, state["challenger_version_id"], db=self.db)
 
         # Persist learning
         learning_id = self.memory.store_learning(
@@ -329,6 +392,7 @@ class SelfImprovementOrchestrator:
             metrics_after=state.get("challenger_metrics", {}),
             decision=decision,
             reason=state.get("reason", "N/A"),
+            db=self.db,
         )
 
         # Log Experiment
@@ -343,6 +407,7 @@ class SelfImprovementOrchestrator:
             metrics=state.get("challenger_metrics", {}),
             decision=decision,
             reason=state.get("reason", ""),
+            db=self.db,
         )
 
         return {
@@ -375,10 +440,10 @@ class SelfImprovementOrchestrator:
 
     def run_cycle(self, initial_state: Optional[SelfImprovementState] = None) -> SelfImprovementState:
         """Executes one complete 7-step autonomous improvement cycle."""
-        strategy_id = "strat_ema_rsi"
+        strategy_id = "strat_ema_rsi_trend"
         champ = self.memory.get_champion_version(strategy_id, db=self.db)
         champ_version_id = champ.version_id if champ else f"{strategy_id}_v1.0.0"
-        champ_metrics = {"sharpe_ratio": 1.15, "max_drawdown_pct": 11.8, "expectancy_usd": 40.0}
+        champ_metrics = {"sharpe_ratio": 0.0, "max_drawdown_pct": 0.0, "expectancy_usd": 0.0}
         if champ:
             db = self.db or SessionLocal()
             own_session = self.db is None
@@ -391,9 +456,9 @@ class SelfImprovementOrchestrator:
                 )
                 if bt_run and bt_run.oos_metrics:
                     champ_metrics = {
-                        "sharpe_ratio": float(bt_run.oos_metrics.get("sharpe_ratio", 1.15)),
-                        "max_drawdown_pct": float(bt_run.oos_metrics.get("max_drawdown_pct", 11.8)),
-                        "expectancy_usd": float(bt_run.oos_metrics.get("expectancy_usd", 40.0)),
+                        "sharpe_ratio": float(bt_run.oos_metrics.get("sharpe_ratio", 0.0)),
+                        "max_drawdown_pct": float(bt_run.oos_metrics.get("max_drawdown_pct", 0.0)),
+                        "expectancy_usd": float(bt_run.oos_metrics.get("expectancy_usd", 0.0)),
                     }
             except Exception as e:
                 logger.warning(f"Failed to fetch champion metrics from DB: {e}")

@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from src.config import settings
+from src.core.rate_limiter import order_rate_limiter
 from src.database.connection import get_db, init_db
 from src.database.models import (
     ApprovalModel,
@@ -99,7 +100,7 @@ app.add_middleware(
 def require_api_key(
     x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
     authorization: Optional[str] = Header(None, alias="Authorization"),
-) -> bool:
+) -> str:
     """Authenticates admin and privileged order endpoints when ADMIN_API_KEY is configured."""
     if not settings.ADMIN_API_KEY:
         raise HTTPException(
@@ -119,7 +120,7 @@ def require_api_key(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Unauthorized: Missing or invalid API key",
         )
-    return True
+    return token
 
 
 def require_admin_token(configured: str, supplied: str, what: str = "Admin token") -> None:
@@ -388,12 +389,30 @@ def list_orders(limit: int = Query(50, le=100), db: Session = Depends(get_db)):
     ]
 
 
-@app.post("/orders", dependencies=[Depends(require_api_key)])
-def submit_order_intent(intent: OrderIntent, db: Session = Depends(get_db)):
+@app.post("/orders")
+def submit_order_intent(
+    intent: OrderIntent,
+    api_key: str = Depends(require_api_key),
+    db: Session = Depends(get_db),
+):
     """
     Submits an order intent to the ExecutionAgent.
     Strictly gates through RiskEngine before reaching any broker.
+    Rate limited per API key (ORDER_RATE_LIMIT_MAX / ORDER_RATE_LIMIT_WINDOW_SEC).
     """
+    # Sliding-window rate limit check per API key
+    allowed, retry_after = order_rate_limiter.check(
+        key=api_key,
+        max_requests=settings.ORDER_RATE_LIMIT_MAX,
+        window_sec=settings.ORDER_RATE_LIMIT_WINDOW_SEC,
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Order rate limit exceeded. Please retry later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     # Fetch latest snapshot
     latest = db.query(MarketSnapshotModel).filter(MarketSnapshotModel.symbol == intent.symbol).order_by(MarketSnapshotModel.timestamp_utc.desc()).first()
     if not latest:

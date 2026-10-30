@@ -25,19 +25,29 @@ os.environ.setdefault("ADMIN_EMERGENCY_KILL_TOKEN", "test-kill-token-xyz12345678
 os.environ.setdefault("ADMIN_RESET_TOKEN", "test-reset-token-xyz1234567890123")
 os.environ.setdefault("ADMIN_HMAC_SECRET", "test-hmac-secret-xyz1234567890123")
 
+# Session-scoped throwaway database for isolated test execution
+import tempfile
+_test_db_fd, _test_db_path = tempfile.mkstemp(suffix="_test_atlas.db")
+os.close(_test_db_fd)
+os.environ["DATABASE_URL"] = f"sqlite:///{_test_db_path.replace(chr(92), '/')}"
+
 from src._uuid_compat import install_uuid_compat
 install_uuid_compat()
 
-from src.database.connection import Base
+from src.database.connection import Base, engine as app_engine, init_db
 from src.schemas.market import MarketSnapshot, IndicatorSet, RegimeLabel
 from src.schemas.strategy import StrategySpec, Rule, RuleLogic, PositionSizingSpec, RiskControlsSpec
 
 
 @pytest.fixture(scope="session")
 def test_db_engine():
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(bind=engine)
-    return engine
+    init_db()
+    yield app_engine
+    try:
+        if os.path.exists(_test_db_path):
+            os.remove(_test_db_path)
+    except Exception:
+        pass
 
 
 @pytest.fixture(scope="function")
